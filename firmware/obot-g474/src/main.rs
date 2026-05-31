@@ -21,6 +21,7 @@ use obot_core::{
 use obot_core::{
     current::CurrentCalibration,
     foc::{FocCommand, FocController, FocDesired, FocMeasured, FocParam},
+    hall::HallElectricalAngle,
 };
 #[cfg(target_os = "none")]
 use obot_g474::adc::CurrentAdc;
@@ -83,6 +84,7 @@ fn firmware_main() -> ! {
         },
     };
     let current_calibration = CurrentCalibration::MOTOR_HALL;
+    let hall_angle = HallElectricalAngle::MOTOR_HALL;
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
     foc.current_mode();
 
@@ -94,16 +96,18 @@ fn firmware_main() -> ! {
         if poll.fast {
             run_measured_loop(&mut fast_benchmark, &cycle_counter, || {
                 pwm.write_zero_voltage();
-                core::hint::black_box(hall.read_count());
+                let hall_count = hall.read_count();
+                let hall_sincos = hall_angle.sincos(hall_count);
                 let currents = current_calibration.convert(current_adc.read_samples());
                 let foc_command = FocCommand {
                     desired: FocDesired::default(),
                     measured: FocMeasured {
                         currents,
-                        motor_electrical_angle: 0.0,
+                        motor_electrical_angle: hall_angle.electrical_radians(hall_count),
                     },
                 };
-                let foc_status = foc.step_with_sincos(&foc_command, 0.0, 1.0);
+                let foc_status =
+                    foc.step_with_sincos(&foc_command, hall_sincos.sin, hall_sincos.cos);
                 core::hint::black_box(foc_status);
                 core::hint::black_box(controller.state());
             });

@@ -1,5 +1,81 @@
 const HALL_TABLE: [u8; 8] = [0, 1, 3, 2, 5, 6, 4, 0];
 
+const SQRT3_OVER_2: f32 = 0.866_025_4;
+const ELECTRICAL_RADIANS_PER_MOTOR_HALL_COUNT: f32 = core::f32::consts::PI / 3.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Sincos {
+    pub sin: f32,
+    pub cos: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HallElectricalAngle {
+    phase_sign: i32,
+    zero_count: i32,
+}
+
+impl HallElectricalAngle {
+    pub const MOTOR_HALL: Self = Self {
+        phase_sign: -1,
+        zero_count: 0,
+    };
+
+    pub const fn new(phase_sign: i32, zero_count: i32) -> Self {
+        Self {
+            phase_sign,
+            zero_count,
+        }
+    }
+
+    #[inline(always)]
+    pub fn electrical_radians(self, count: i32) -> f32 {
+        self.signed_electrical_count(count) as f32 * ELECTRICAL_RADIANS_PER_MOTOR_HALL_COUNT
+    }
+
+    #[inline(always)]
+    pub fn sincos(self, count: i32) -> Sincos {
+        match rem_euclid_6(self.signed_electrical_count(count)) {
+            0 => Sincos { sin: 0.0, cos: 1.0 },
+            1 => Sincos {
+                sin: SQRT3_OVER_2,
+                cos: 0.5,
+            },
+            2 => Sincos {
+                sin: SQRT3_OVER_2,
+                cos: -0.5,
+            },
+            3 => Sincos {
+                sin: 0.0,
+                cos: -1.0,
+            },
+            4 => Sincos {
+                sin: -SQRT3_OVER_2,
+                cos: -0.5,
+            },
+            _ => Sincos {
+                sin: -SQRT3_OVER_2,
+                cos: 0.5,
+            },
+        }
+    }
+
+    #[inline(always)]
+    fn signed_electrical_count(self, count: i32) -> i32 {
+        self.phase_sign * (count - self.zero_count)
+    }
+}
+
+#[inline(always)]
+fn rem_euclid_6(value: i32) -> i32 {
+    let remainder = value % 6;
+    if remainder < 0 {
+        remainder + 6
+    } else {
+        remainder
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HallEncoder {
     count: i32,
@@ -69,5 +145,27 @@ mod tests {
         assert_eq!(encoder.read(7), 0);
         assert_eq!(encoder.read(1), 1);
         assert_eq!(encoder.read(7), 1);
+    }
+
+    #[test]
+    fn motor_hall_angle_uses_phase_mode_one_sign() {
+        let angle = super::HallElectricalAngle::MOTOR_HALL;
+
+        assert_close(angle.electrical_radians(1), -core::f32::consts::PI / 3.0);
+        assert_close(angle.sincos(0).sin, 0.0);
+        assert_close(angle.sincos(0).cos, 1.0);
+        assert_close(angle.sincos(1).sin, -0.866_025_4);
+        assert_close(angle.sincos(1).cos, 0.5);
+        assert_close(angle.sincos(2).sin, -0.866_025_4);
+        assert_close(angle.sincos(2).cos, -0.5);
+        assert_close(angle.sincos(3).sin, 0.0);
+        assert_close(angle.sincos(3).cos, -1.0);
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1.0e-6,
+            "actual={actual}, expected={expected}"
+        );
     }
 }
