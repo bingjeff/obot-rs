@@ -832,10 +832,30 @@ struct UsbDriverCheckFields {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+struct UsbDriverPostDisableFields {
+    sent: bool,
+    driver_not_enabled: bool,
+    command_version: u32,
+    consumed_version: u32,
+}
+
+impl UsbDriverPostDisableFields {
+    fn not_sent() -> Self {
+        Self {
+            sent: false,
+            driver_not_enabled: false,
+            command_version: 0,
+            consumed_version: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct UsbDriverCheckResult {
     command: DriverCommand,
     immediate_status: StatusPacket,
     fields: UsbDriverCheckFields,
+    post_disable: UsbDriverPostDisableFields,
     report_observed: bool,
     expectation: DriverCheckExpectation,
     check_passed: bool,
@@ -1560,7 +1580,9 @@ fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckRes
         report_observed,
     );
 
-    if options.command.command == DriverCommand::ConfigureEnable && !options.leave_driver_enabled {
+    let post_disable = if options.command.command == DriverCommand::ConfigureEnable
+        && !options.leave_driver_enabled
+    {
         let mut disable = options.command.clone();
         disable.sequence = disable.sequence.wrapping_add(1);
         disable.command = DriverCommand::Disable;
@@ -1569,12 +1591,17 @@ fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckRes
             command: disable.command,
         };
         transact_driver_command_usb(&disable, disable_packet)?;
-    }
+        thread::sleep(Duration::from_millis(options.reset_settle_ms as u64));
+        read_usb_driver_post_disable_fields(&device_path, options.command.timeout_ms)?
+    } else {
+        UsbDriverPostDisableFields::not_sent()
+    };
 
     Ok(UsbDriverCheckResult {
         command: options.command.command,
         immediate_status,
         fields,
+        post_disable,
         report_observed,
         expectation: options.expectation,
         check_passed,
@@ -1633,6 +1660,24 @@ fn read_usb_driver_check_fields(
         bridge_prearm_blockers: text_api_usb_u32_on_file(
             &file,
             "bridge_prearm_blockers",
+            timeout_ms,
+        )?,
+    })
+}
+
+fn read_usb_driver_post_disable_fields(
+    device_path: &Path,
+    timeout_ms: u32,
+) -> Result<UsbDriverPostDisableFields, String> {
+    let file = open_usb_device(device_path)?;
+    let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
+    Ok(UsbDriverPostDisableFields {
+        sent: true,
+        driver_not_enabled: text_api_usb_bool_on_file(&file, "driver_not_enabled", timeout_ms)?,
+        command_version: text_api_usb_u32_on_file(&file, "driver_command_version", timeout_ms)?,
+        consumed_version: text_api_usb_u32_on_file(
+            &file,
+            "driver_command_consumed_version",
             timeout_ms,
         )?,
     })
@@ -2731,8 +2776,9 @@ fn format_status_csv(name: &str, packet: StatusPacket) -> String {
 
 fn format_usb_driver_check_csv(name: &str, result: UsbDriverCheckResult) -> String {
     let fields = result.fields;
+    let post_disable = result.post_disable;
     format!(
-        "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled, bridge_prearm_ready, bridge_prearm_blockers\n{}, {}, {}, {}, {}, {}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}, {}, 0x{:04X}, {}, {}, {}, 0x{:08X}\n",
+        "name, command, status_sequence, fault, report_observed, expectation, check_passed, post_disable_sent, post_disable_driver_not_enabled, post_disable_command_version, post_disable_consumed_version, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled, bridge_prearm_ready, bridge_prearm_blockers\n{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}, {}, 0x{:04X}, {}, {}, {}, 0x{:08X}\n",
         name,
         format_driver_command(result.command),
         result.immediate_status.sequence,
@@ -2740,6 +2786,10 @@ fn format_usb_driver_check_csv(name: &str, result: UsbDriverCheckResult) -> Stri
         result.report_observed,
         format_driver_check_expectation(result.expectation),
         result.check_passed,
+        post_disable.sent,
+        post_disable.driver_not_enabled,
+        post_disable.command_version,
+        post_disable.consumed_version,
         fields.driver_configured,
         fields.verify_error_mask,
         fields.transfer_error_mask,
@@ -3725,6 +3775,12 @@ mod tests {
                     bridge_prearm_ready: false,
                     bridge_prearm_blockers: 0x0000_0003,
                 },
+                post_disable: UsbDriverPostDisableFields {
+                    sent: true,
+                    driver_not_enabled: true,
+                    command_version: 96,
+                    consumed_version: 96,
+                },
                 report_observed: true,
                 expectation: DriverCheckExpectation::UnpoweredFailClosed,
                 check_passed: true,
@@ -3733,7 +3789,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled, bridge_prearm_ready, bridge_prearm_blockers\nrust, configure_enable, 94, none, true, unpowered_fail_closed, true, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2, 0x0000, true, false, false, 0x00000003\n"
+            "name, command, status_sequence, fault, report_observed, expectation, check_passed, post_disable_sent, post_disable_driver_not_enabled, post_disable_command_version, post_disable_consumed_version, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled, bridge_prearm_ready, bridge_prearm_blockers\nrust, configure_enable, 94, none, true, unpowered_fail_closed, true, true, true, 96, 96, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2, 0x0000, true, false, false, 0x00000003\n"
         );
     }
 
