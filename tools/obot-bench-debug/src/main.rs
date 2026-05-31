@@ -44,6 +44,8 @@ const DEFAULT_USB_TIMEOUT_MS: u32 = 1_000;
 const USB_REALTIME_INTERFACE: u32 = 0;
 const USB_REALTIME_OUT_ENDPOINT: u32 = 0x02;
 const USB_REALTIME_IN_ENDPOINT: u32 = 0x82;
+const USB_TEXT_OUT_ENDPOINT: u32 = 0x01;
+const USB_TEXT_IN_ENDPOINT: u32 = 0x81;
 const USBDEVFS_BULK: c_ulong = 0xC018_5502;
 const USBDEVFS_CLAIMINTERFACE: c_ulong = 0x8004_550F;
 const USBDEVFS_RELEASEINTERFACE: c_ulong = 0x8004_5510;
@@ -80,6 +82,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "read-jlink" => read_jlink_command(rest),
         "read-jlink-detail" => read_jlink_detail_command(rest),
         "run-stats-jlink" => run_stats_jlink_command(rest),
+        "run-stats-usb" => run_stats_usb_command(rest),
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
         "read-output-safety-jlink" => read_output_safety_jlink_command(rest),
@@ -87,6 +90,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "snapshot-jlink" => snapshot_jlink_command(rest),
         "api-snapshot-jlink" => api_snapshot_jlink_command(rest),
         "read-text-api-response-jlink" => read_text_api_response_jlink_command(rest),
+        "read-text-api-usb" => read_text_api_usb_command(rest),
         "write-text-api-request-jlink" => write_text_api_request_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
         "write-command-usb" => write_command_usb_command(rest),
@@ -201,6 +205,17 @@ fn run_stats_jlink_command(args: &[String]) -> Result<String, String> {
     let jlink = options.resolve(BENCHMARK_PACKET_SYMBOL)?;
     let bytes = read_jlink_bytes(&jlink, BENCHMARK_PACKET_LEN)?;
     decode_packet_csv(&bytes)
+}
+
+fn run_stats_usb_command(args: &[String]) -> Result<String, String> {
+    let options = UsbRunStatsOptions::parse(args)?;
+    let stats = read_usb_run_stats(&options)?;
+    Ok(format_usb_run_stats_csv(DEFAULT_NAME, stats))
+}
+
+fn read_text_api_usb_command(args: &[String]) -> Result<String, String> {
+    let options = TextApiUsbOptions::parse(args)?;
+    Ok(format!("{}\n", read_text_api_usb(&options)?))
 }
 
 fn read_status_jlink_command(args: &[String]) -> Result<String, String> {
@@ -659,6 +674,32 @@ struct RealtimeUsbOptions {
     timeout_ms: u32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct TextApiUsbOptions {
+    device_path: Option<PathBuf>,
+    request: String,
+    timeout_ms: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct UsbRunStatsOptions {
+    device_path: Option<PathBuf>,
+    samples: usize,
+    timeout_ms: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UsbRunStats {
+    max_fast_loop_cycles: u32,
+    max_fast_loop_period: u32,
+    max_main_loop_cycles: u32,
+    max_main_loop_period: u32,
+    mean_fast_loop_cycles_milli: u64,
+    mean_fast_loop_period_milli: u64,
+    mean_main_loop_cycles_milli: u64,
+    mean_main_loop_period_milli: u64,
+}
+
 #[repr(C)]
 struct UsbdevfsBulkTransfer {
     ep: u32,
@@ -739,6 +780,107 @@ struct ResolvedTextApiRequestWriteOptions {
     request: String,
 }
 
+impl TextApiUsbOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            device_path: None,
+            request: String::new(),
+            timeout_ms: DEFAULT_USB_TIMEOUT_MS,
+        };
+        let mut request = None;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--dev" | "--device-path" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--dev requires a value".to_string())?;
+                    options.device_path = Some(PathBuf::from(path));
+                }
+                "--timeout-ms" => {
+                    index += 1;
+                    options.timeout_ms = parse_u32_arg(args.get(index), "--timeout-ms")?;
+                }
+                value => {
+                    if request.is_some() {
+                        return Err(format!(
+                            "unexpected extra text API request argument `{value}`"
+                        ));
+                    }
+                    request = Some(value.to_string());
+                }
+            }
+            index += 1;
+        }
+
+        options.request =
+            request.ok_or_else(|| "read-text-api-usb requires a request".to_string())?;
+        Ok(options)
+    }
+
+    fn resolved_device_path(&self) -> Result<PathBuf, String> {
+        resolve_usb_device_path(self.device_path.as_ref())
+    }
+}
+
+impl UsbRunStatsOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            device_path: None,
+            samples: 100,
+            timeout_ms: DEFAULT_USB_TIMEOUT_MS,
+        };
+        let mut positional_samples = None;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--dev" | "--device-path" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--dev requires a value".to_string())?;
+                    options.device_path = Some(PathBuf::from(path));
+                }
+                "--samples" => {
+                    index += 1;
+                    let samples = parse_u32_arg(args.get(index), "--samples")?;
+                    options.samples = samples
+                        .try_into()
+                        .map_err(|_| "--samples does not fit in usize".to_string())?;
+                }
+                "--timeout-ms" => {
+                    index += 1;
+                    options.timeout_ms = parse_u32_arg(args.get(index), "--timeout-ms")?;
+                }
+                value => {
+                    if positional_samples.is_some() {
+                        return Err(format!("unexpected extra sample-count argument `{value}`"));
+                    }
+                    positional_samples = Some(
+                        parse_u32(value)
+                            .ok_or_else(|| format!("invalid sample-count argument `{value}`"))?,
+                    );
+                }
+            }
+            index += 1;
+        }
+        if let Some(samples) = positional_samples {
+            options.samples = samples
+                .try_into()
+                .map_err(|_| "sample count does not fit in usize".to_string())?;
+        }
+        if options.samples == 0 {
+            return Err("run-stats-usb requires at least one sample".to_string());
+        }
+        Ok(options)
+    }
+
+    fn resolved_device_path(&self) -> Result<PathBuf, String> {
+        resolve_usb_device_path(self.device_path.as_ref())
+    }
+}
+
 impl RealtimeUsbOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
@@ -800,10 +942,14 @@ impl RealtimeUsbOptions {
     }
 
     fn resolved_device_path(&self) -> Result<PathBuf, String> {
-        match &self.device_path {
-            Some(path) => Ok(path.clone()),
-            None => discover_obot_usb_device_path(),
-        }
+        resolve_usb_device_path(self.device_path.as_ref())
+    }
+}
+
+fn resolve_usb_device_path(device_path: Option<&PathBuf>) -> Result<PathBuf, String> {
+    match device_path {
+        Some(path) => Ok(path.clone()),
+        None => discover_obot_usb_device_path(),
     }
 }
 
@@ -908,16 +1054,129 @@ impl Drop for UsbInterfaceClaim<'_> {
     }
 }
 
+fn read_text_api_usb(options: &TextApiUsbOptions) -> Result<String, String> {
+    let device_path = options.resolved_device_path()?;
+    let file = open_usb_device(&device_path)?;
+    let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
+    text_api_usb_request_on_file(&file, &options.request, options.timeout_ms)
+}
+
+fn read_usb_run_stats(options: &UsbRunStatsOptions) -> Result<UsbRunStats, String> {
+    let device_path = options.resolved_device_path()?;
+    let file = open_usb_device(&device_path)?;
+    let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
+
+    let mut stats = UsbRunStatsAccumulator::default();
+    for _ in 0..options.samples {
+        let fast_cycles = text_api_usb_u32_on_file(&file, "t_exec_fastloop", options.timeout_ms)?;
+        let fast_period = text_api_usb_u32_on_file(&file, "t_period_fastloop", options.timeout_ms)?;
+        let main_cycles = text_api_usb_u32_on_file(&file, "t_exec_mainloop", options.timeout_ms)?;
+        let main_period = text_api_usb_u32_on_file(&file, "t_period_mainloop", options.timeout_ms)?;
+        stats.push(fast_cycles, fast_period, main_cycles, main_period);
+    }
+
+    Ok(stats.finish())
+}
+
+fn open_usb_device(path: &Path) -> Result<fs::File, String> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("failed to open `{}`: {error}", path.display()))
+}
+
+fn text_api_usb_u32_on_file(
+    file: &fs::File,
+    request: &str,
+    timeout_ms: u32,
+) -> Result<u32, String> {
+    let response = text_api_usb_request_on_file(file, request, timeout_ms)?;
+    response
+        .trim()
+        .parse()
+        .map_err(|_| format!("text API `{request}` returned non-u32 response `{response}`"))
+}
+
+fn text_api_usb_request_on_file(
+    file: &fs::File,
+    request: &str,
+    timeout_ms: u32,
+) -> Result<String, String> {
+    if request.len() > usb_control::BULK_MAX_PACKET_SIZE as usize {
+        return Err(format!(
+            "text API request is {} bytes; maximum is {}",
+            request.len(),
+            usb_control::BULK_MAX_PACKET_SIZE
+        ));
+    }
+
+    let mut request_bytes = request.as_bytes().to_vec();
+    let written = usbfs_bulk_transfer(file, USB_TEXT_OUT_ENDPOINT, &mut request_bytes, timeout_ms)?;
+    if written != request_bytes.len() {
+        return Err(format!(
+            "short text API write: wrote {written} of {} bytes",
+            request_bytes.len()
+        ));
+    }
+
+    let mut response = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
+    let read = usbfs_bulk_transfer(file, USB_TEXT_IN_ENDPOINT, &mut response, timeout_ms)?;
+    std::str::from_utf8(&response[..read])
+        .map(|response| response.to_string())
+        .map_err(|error| format!("text API response was not UTF-8: {error}"))
+}
+
+#[derive(Default)]
+struct UsbRunStatsAccumulator {
+    samples: u64,
+    max_fast_loop_cycles: u32,
+    max_fast_loop_period: u32,
+    max_main_loop_cycles: u32,
+    max_main_loop_period: u32,
+    sum_fast_loop_cycles: u64,
+    sum_fast_loop_period: u64,
+    sum_main_loop_cycles: u64,
+    sum_main_loop_period: u64,
+}
+
+impl UsbRunStatsAccumulator {
+    fn push(&mut self, fast_cycles: u32, fast_period: u32, main_cycles: u32, main_period: u32) {
+        self.samples += 1;
+        self.max_fast_loop_cycles = self.max_fast_loop_cycles.max(fast_cycles);
+        self.max_fast_loop_period = self.max_fast_loop_period.max(fast_period);
+        self.max_main_loop_cycles = self.max_main_loop_cycles.max(main_cycles);
+        self.max_main_loop_period = self.max_main_loop_period.max(main_period);
+        self.sum_fast_loop_cycles += fast_cycles as u64;
+        self.sum_fast_loop_period += fast_period as u64;
+        self.sum_main_loop_cycles += main_cycles as u64;
+        self.sum_main_loop_period += main_period as u64;
+    }
+
+    fn finish(self) -> UsbRunStats {
+        UsbRunStats {
+            max_fast_loop_cycles: self.max_fast_loop_cycles,
+            max_fast_loop_period: self.max_fast_loop_period,
+            max_main_loop_cycles: self.max_main_loop_cycles,
+            max_main_loop_period: self.max_main_loop_period,
+            mean_fast_loop_cycles_milli: mean_milli(self.sum_fast_loop_cycles, self.samples),
+            mean_fast_loop_period_milli: mean_milli(self.sum_fast_loop_period, self.samples),
+            mean_main_loop_cycles_milli: mean_milli(self.sum_main_loop_cycles, self.samples),
+            mean_main_loop_period_milli: mean_milli(self.sum_main_loop_period, self.samples),
+        }
+    }
+}
+
+fn mean_milli(sum: u64, samples: u64) -> u64 {
+    (sum * 1_000 + samples / 2) / samples
+}
+
 fn transact_realtime_usb(
     options: &RealtimeUsbOptions,
     packet: CommandPacket,
 ) -> Result<StatusPacket, String> {
     let device_path = options.resolved_device_path()?;
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&device_path)
-        .map_err(|error| format!("failed to open `{}`: {error}", device_path.display()))?;
+    let file = open_usb_device(&device_path)?;
     let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
 
     let mut command = packet.encode();
@@ -1974,6 +2233,21 @@ fn decode_packet(bytes: &[u8]) -> Result<BenchmarkPacket, String> {
     BenchmarkPacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
 }
 
+fn format_usb_run_stats_csv(name: &str, stats: UsbRunStats) -> String {
+    format!(
+        "name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period\n{}, {}, {}, {}, {}, {}, {}, {}, {}\n",
+        name,
+        stats.max_fast_loop_cycles,
+        stats.max_fast_loop_period,
+        stats.max_main_loop_cycles,
+        stats.max_main_loop_period,
+        format_milli_cycles(stats.mean_fast_loop_cycles_milli),
+        format_milli_cycles(stats.mean_fast_loop_period_milli),
+        format_milli_cycles(stats.mean_main_loop_cycles_milli),
+        format_milli_cycles(stats.mean_main_loop_period_milli),
+    )
+}
+
 fn format_run_stats_csv(name: &str, packet: BenchmarkPacket) -> String {
     let report = packet.report;
     format!(
@@ -2133,6 +2407,7 @@ fn usage() -> String {
   obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
+  obot-bench-debug run-stats-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
   obot-bench-debug read-status-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <status-packet-address>] [--speed 4000]
   obot-bench-debug read-driver-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <driver-report-address>] [--speed 4000]
   obot-bench-debug read-output-safety-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <output-safety-address>] [--speed 4000]
@@ -2141,6 +2416,7 @@ fn usage() -> String {
   obot-bench-debug api-snapshot-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--speed 4000] <api-request>
   obot-bench-debug write-text-api-request-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <text-api-request-address>] [--sequence-address <text-api-request-sequence-address>] [--sequence N] <api-request>
   obot-bench-debug read-text-api-response-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <text-api-response-address>] [--speed 4000]
+  obot-bench-debug read-text-api-usb [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N] <api-request>
   obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
   obot-bench-debug write-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad] [--timeout-ms N]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
@@ -2585,6 +2861,69 @@ mod tests {
         assert_eq!(options.sequence_address, Some(0x2000_00d2));
         assert_eq!(options.sequence, 9);
         assert_eq!(options.request, "mean_fast_loop_cycles");
+    }
+
+    #[test]
+    fn parses_text_api_usb_options() {
+        let options = TextApiUsbOptions::parse(&[
+            "--dev".to_string(),
+            "/dev/bus/usb/001/043".to_string(),
+            "--timeout-ms".to_string(),
+            "250".to_string(),
+            "api_length".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            options.device_path,
+            Some(PathBuf::from("/dev/bus/usb/001/043"))
+        );
+        assert_eq!(options.timeout_ms, 250);
+        assert_eq!(options.request, "api_length");
+    }
+
+    #[test]
+    fn parses_usb_run_stats_options() {
+        let options = UsbRunStatsOptions::parse(&[
+            "--samples".to_string(),
+            "12".to_string(),
+            "--timeout-ms".to_string(),
+            "250".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.device_path, None);
+        assert_eq!(options.samples, 12);
+        assert_eq!(options.timeout_ms, 250);
+    }
+
+    #[test]
+    fn parses_positional_usb_run_stats_sample_count() {
+        let options = UsbRunStatsOptions::parse(&["7".to_string()]).unwrap();
+
+        assert_eq!(options.samples, 7);
+    }
+
+    #[test]
+    fn formats_usb_run_stats_like_motor_util() {
+        let output = format_usb_run_stats_csv(
+            "rust",
+            UsbRunStats {
+                max_fast_loop_cycles: 710,
+                max_fast_loop_period: 3416,
+                max_main_loop_cycles: 6445,
+                max_main_loop_period: 17045,
+                mean_fast_loop_cycles_milli: 708_965,
+                mean_fast_loop_period_milli: 3_397_560,
+                mean_main_loop_cycles_milli: 3_555_490,
+                mean_main_loop_period_milli: 16_999_800,
+            },
+        );
+
+        assert_eq!(
+            output,
+            "name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period\nrust, 710, 3416, 6445, 17045, 708.965, 3397.56, 3555.49, 16999.8\n"
+        );
     }
 
     #[test]

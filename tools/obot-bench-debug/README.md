@@ -26,6 +26,18 @@ The decoded output is shaped like `motor_util --run-stats`:
 name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
 ```
 
+The same benchmark shape can be collected over the Rust firmware's USB text endpoint without J-Link:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- run-stats-usb 100
+```
+
+For one-off USB text API reads, use:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-text-api-usb t_exec_fastloop
+```
+
 
 For detailed benchmark diagnostics, including sample counts and last-cycle values for each tracked statistic:
 
