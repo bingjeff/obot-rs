@@ -230,6 +230,20 @@ impl FocController {
     }
 
     #[inline(always)]
+    pub fn step_current_mode_voltage_command_with_sincos(
+        &mut self,
+        desired: FocDesired,
+        currents: PhaseCurrents,
+        sin_t: f32,
+        cos_t: f32,
+    ) -> FocVoltages {
+        let (_, i_d_filtered, i_q_filtered) = self.measure_currents(currents, sin_t, cos_t);
+        let v_d = self.pi_d.step(desired.i_d, i_d_filtered);
+        let v_q = self.pi_q.step(desired.i_q, i_q_filtered) + desired.v_q;
+        voltage_command_from_dq(v_d, v_q, sin_t, cos_t)
+    }
+
+    #[inline(always)]
     fn step_parts(
         &mut self,
         desired: FocDesired,
@@ -237,6 +251,19 @@ impl FocController {
         sin_t: f32,
         cos_t: f32,
     ) -> (DqCurrents, FocVoltages) {
+        let (measured, i_d_filtered, i_q_filtered) = self.measure_currents(currents, sin_t, cos_t);
+        let v_d = self.i_gain * self.pi_d.step(desired.i_d, i_d_filtered);
+        let v_q = self.i_gain * self.pi_q.step(desired.i_q, i_q_filtered) + desired.v_q;
+        (measured, voltage_command_from_dq(v_d, v_q, sin_t, cos_t))
+    }
+
+    #[inline(always)]
+    fn measure_currents(
+        &mut self,
+        currents: PhaseCurrents,
+        sin_t: f32,
+        cos_t: f32,
+    ) -> (DqCurrents, f32, f32) {
         let i_alpha = TWO_THIRDS * currents.phase_a
             + NEG_ONE_THIRD * currents.phase_b
             + NEG_ONE_THIRD * currents.phase_c;
@@ -247,29 +274,28 @@ impl FocController {
         let i_d_filtered = self.id_filter.update(i_d);
         let i_q_filtered = self.iq_filter.update(i_q);
 
-        let v_d = self.i_gain * self.pi_d.step(desired.i_d, i_d_filtered);
-        let v_q = self.i_gain * self.pi_q.step(desired.i_q, i_q_filtered) + desired.v_q;
-
-        let v_alpha = cos_t * v_d + sin_t * v_q;
-        let v_beta = -sin_t * v_d + cos_t * v_q;
-        let v_a = TWO_THIRDS * v_alpha;
-        let v_b = NEG_ONE_THIRD * v_alpha + ONE_OVER_SQRT3 * v_beta;
-        let v_c = NEG_ONE_THIRD * v_alpha - ONE_OVER_SQRT3 * v_beta;
-
         (
             DqCurrents {
                 i_d,
                 i_q,
                 i_0: currents.phase_a + currents.phase_b + currents.phase_c,
             },
-            FocVoltages {
-                v_a,
-                v_b,
-                v_c,
-                v_d,
-                v_q,
-            },
+            i_d_filtered,
+            i_q_filtered,
         )
+    }
+}
+
+#[inline(always)]
+fn voltage_command_from_dq(v_d: f32, v_q: f32, sin_t: f32, cos_t: f32) -> FocVoltages {
+    let v_alpha = cos_t * v_d + sin_t * v_q;
+    let v_beta = -sin_t * v_d + cos_t * v_q;
+    FocVoltages {
+        v_a: TWO_THIRDS * v_alpha,
+        v_b: NEG_ONE_THIRD * v_alpha + ONE_OVER_SQRT3 * v_beta,
+        v_c: NEG_ONE_THIRD * v_alpha - ONE_OVER_SQRT3 * v_beta,
+        v_d,
+        v_q,
     }
 }
 
@@ -373,6 +399,43 @@ mod tests {
         assert_close(status.command.v_a, TWO_THIRDS * expected_vd);
         assert_close(status.command.v_b, NEG_ONE_THIRD * expected_vd);
         assert_close(status.command.v_c, NEG_ONE_THIRD * expected_vd);
+    }
+
+    #[test]
+    fn current_mode_fast_path_matches_generic_current_mode_step() {
+        let desired = FocDesired {
+            i_d: 0.25,
+            i_q: -0.75,
+            v_q: 0.5,
+        };
+        let currents = PhaseCurrents {
+            phase_a: 0.8,
+            phase_b: -0.3,
+            phase_c: -0.5,
+        };
+        let mut generic = FocController::new(FocParam::MOTOR_HALL, DT_50_KHZ);
+        let mut fast_path = FocController::new(FocParam::MOTOR_HALL, DT_50_KHZ);
+        generic.current_mode();
+        fast_path.current_mode();
+
+        let expected =
+            generic.step_voltage_command_with_sincos(desired, currents, 0.5, 0.866_025_4);
+        let actual = fast_path.step_current_mode_voltage_command_with_sincos(
+            desired,
+            currents,
+            0.5,
+            0.866_025_4,
+        );
+
+        assert_voltages_close(actual, expected);
+    }
+
+    fn assert_voltages_close(actual: FocVoltages, expected: FocVoltages) {
+        assert_close(actual.v_a, expected.v_a);
+        assert_close(actual.v_b, expected.v_b);
+        assert_close(actual.v_c, expected.v_c);
+        assert_close(actual.v_d, expected.v_d);
+        assert_close(actual.v_q, expected.v_q);
     }
 
     fn assert_close(actual: f32, expected: f32) {

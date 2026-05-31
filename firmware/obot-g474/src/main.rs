@@ -387,7 +387,7 @@ impl FastLoopContext {
         self.hall_count = hall_sample.count;
         let hall_sincos = HallElectricalAngle::motor_hall_sincos_hall_count(hall_sample.hall_count);
         let currents = CurrentCalibration::motor_hall_convert(self.current_adc.read_samples());
-        let voltage_command = self.foc.step_voltage_command_with_sincos(
+        let voltage_command = self.foc.step_current_mode_voltage_command_with_sincos(
             self.foc_desired,
             currents,
             hall_sincos.sin,
