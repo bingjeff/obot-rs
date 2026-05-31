@@ -126,7 +126,6 @@ fn firmware_main() -> ! {
                 core::hint::black_box(foc_status);
                 core::hint::black_box(pwm_compares);
                 core::hint::black_box(output_allowed);
-                core::hint::black_box(controller.state());
             });
         }
 
