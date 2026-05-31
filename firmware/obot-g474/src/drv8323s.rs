@@ -38,6 +38,17 @@ const SCK_PIN: u32 = 5;
 const MISO_PIN: u32 = 6;
 const MOSI_PIN: u32 = 7;
 const STATUS_POLL_TIMEOUT: u32 = 16_000;
+const TRANSFER_STATUS_BEFORE_BIT: u16 = 1 << 0;
+const TRANSFER_CONFIG_SHIFT: u16 = 1;
+const TRANSFER_STATUS_AFTER_BIT: u16 = 1 << 6;
+
+pub const MOTOR_HALL_REGS: [u16; 5] = [
+    2 << 11,
+    (3 << 11) | 0x3FF,
+    (4 << 11) | 0x37F,
+    5 << 11,
+    (6 << 11) | 0x2C0,
+];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Drv8323sStatus {
@@ -48,6 +59,20 @@ pub struct Drv8323sStatus {
 impl Drv8323sStatus {
     pub const fn as_u32(self) -> u32 {
         self.fault_status_1 as u32 | ((self.vgs_status_2 as u32) << 16)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Drv8323sConfigReport {
+    pub status_before: Option<Drv8323sStatus>,
+    pub status_after: Option<Drv8323sStatus>,
+    pub verify_error_mask: u16,
+    pub transfer_error_mask: u16,
+}
+
+impl Drv8323sConfigReport {
+    pub const fn configured(self) -> bool {
+        self.verify_error_mask == 0 && self.transfer_error_mask == 0
     }
 }
 
@@ -64,16 +89,49 @@ impl Drv8323s {
 
     #[cold]
     #[inline(never)]
+    pub fn configure_motor_hall_registers(&self) -> Drv8323sConfigReport {
+        self.configure_registers(&MOTOR_HALL_REGS)
+    }
+
+    #[cold]
+    #[inline(never)]
     pub fn read_status(&self) -> Option<Drv8323sStatus> {
         self.start_transaction();
-        let fault_status_1 = self.read_register(0);
-        let vgs_status_2 = self.read_register(1);
+        let status = self.read_status_in_transaction();
         self.end_transaction();
+        status
+    }
 
-        Some(Drv8323sStatus {
-            fault_status_1: fault_status_1?,
-            vgs_status_2: vgs_status_2?,
-        })
+    fn configure_registers(&self, registers: &[u16]) -> Drv8323sConfigReport {
+        self.start_transaction();
+
+        let mut report = Drv8323sConfigReport {
+            status_before: self.read_status_in_transaction(),
+            ..Drv8323sConfigReport::default()
+        };
+        if report.status_before.is_none() {
+            report.transfer_error_mask |= TRANSFER_STATUS_BEFORE_BIT;
+        }
+
+        for (index, reg_out) in registers.iter().copied().enumerate() {
+            let transfer_bit = 1 << (TRANSFER_CONFIG_SHIFT + index as u16);
+            let address = ((reg_out >> 11) & 0x7) as u8;
+            let write_ok = self.write_register(reg_out).is_some();
+            let reg_in = self.read_register(address);
+            match (write_ok, reg_in) {
+                (true, Some(reg_in)) if (reg_in & 0x07FF) == (reg_out & 0x07FF) => {}
+                (true, Some(_)) => report.verify_error_mask |= 1 << index,
+                _ => report.transfer_error_mask |= transfer_bit,
+            }
+        }
+
+        report.status_after = self.read_status_in_transaction();
+        if report.status_after.is_none() {
+            report.transfer_error_mask |= TRANSFER_STATUS_AFTER_BIT;
+        }
+
+        self.end_transaction();
+        report
     }
 
     fn start_transaction(&self) {
@@ -86,6 +144,20 @@ impl Drv8323s {
     fn end_transaction(&self) {
         write(SPI_CR1, 0);
         configure_nss_idle_high();
+    }
+
+    fn read_status_in_transaction(&self) -> Option<Drv8323sStatus> {
+        let fault_status_1 = self.read_register(0);
+        let vgs_status_2 = self.read_register(1);
+
+        Some(Drv8323sStatus {
+            fault_status_1: fault_status_1?,
+            vgs_status_2: vgs_status_2?,
+        })
+    }
+
+    fn write_register(&self, word: u16) -> Option<u16> {
+        transfer(word)
     }
 
     fn read_register(&self, address: u8) -> Option<u16> {

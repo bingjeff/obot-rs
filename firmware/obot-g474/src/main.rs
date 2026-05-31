@@ -36,13 +36,13 @@ use obot_g474::cycle_counter::{CycleCounter, DwtCycleCounter};
 #[cfg(target_os = "none")]
 use obot_g474::driver::MotorDriverPins;
 #[cfg(target_os = "none")]
-use obot_g474::drv8323s::Drv8323s;
+use obot_g474::drv8323s::{Drv8323s, Drv8323sConfigReport};
 #[cfg(target_os = "none")]
 use obot_g474::hall::HallInputs;
 #[cfg(target_os = "none")]
 use obot_g474::pwm::SafeZeroPwm;
 #[cfg(target_os = "none")]
-use obot_protocol::{BenchmarkPacket, StatusPacket};
+use obot_protocol::{BenchmarkPacket, DriverReportPacket, StatusPacket};
 
 #[cfg(target_os = "none")]
 const FAST_LOOP_DT_S: f32 = 1.0 / 50_000.0;
@@ -188,13 +188,33 @@ fn service_host_debug(command_sequence: &mut u8, status_sequence: u8) -> (bool, 
 }
 
 #[cfg(target_os = "none")]
-#[cfg(target_os = "none")]
 #[cold]
 #[inline(never)]
 fn probe_driver_spi_status() {
     let driver_spi = Drv8323s::init_motor_hall();
-    let status = driver_spi.read_status();
-    core::hint::black_box(status.map(|status| status.as_u32()));
+    let report = driver_spi.configure_motor_hall_registers();
+    publish_driver_report(0, report);
+    core::hint::black_box((
+        report.configured(),
+        report.verify_error_mask,
+        report.transfer_error_mask,
+    ));
+}
+
+#[cfg(target_os = "none")]
+fn publish_driver_report(sequence: u8, report: Drv8323sConfigReport) {
+    debug_report::publish_driver_report(DriverReportPacket {
+        sequence,
+        configured: report.configured(),
+        verify_error_mask: report.verify_error_mask,
+        transfer_error_mask: report.transfer_error_mask,
+        status_before: report.status_before.map_or(0, |status| status.as_u32()),
+        status_after: report.status_after.map_or(0, |status| status.as_u32()),
+    });
+    core::hint::black_box((
+        debug_report::driver_report_packet_ptr(),
+        debug_report::driver_report_packet_len(),
+    ));
 }
 
 fn controller_storage_mut() -> &'static mut Controller {

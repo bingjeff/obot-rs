@@ -7,6 +7,7 @@ use obot_core::{
 
 pub const COMMAND_PACKET_LEN: usize = 14;
 pub const STATUS_PACKET_LEN: usize = 14;
+pub const DRIVER_REPORT_PACKET_LEN: usize = 14;
 pub const BENCHMARK_PACKET_LEN: usize = 81;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +79,43 @@ impl StatusPacket {
                 velocity_rad_s: f32::from_le_bytes(bytes[6..10].try_into().unwrap()),
                 position_rad: f32::from_le_bytes(bytes[10..14].try_into().unwrap()),
             },
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DriverReportPacket {
+    pub sequence: u8,
+    pub configured: bool,
+    pub verify_error_mask: u16,
+    pub transfer_error_mask: u16,
+    pub status_before: u32,
+    pub status_after: u32,
+}
+
+impl DriverReportPacket {
+    pub fn encode(self) -> [u8; DRIVER_REPORT_PACKET_LEN] {
+        let mut out = [0; DRIVER_REPORT_PACKET_LEN];
+        out[0] = self.sequence;
+        out[1] = u8::from(self.configured);
+        out[2..4].copy_from_slice(&self.verify_error_mask.to_le_bytes());
+        out[4..6].copy_from_slice(&self.transfer_error_mask.to_le_bytes());
+        out[6..10].copy_from_slice(&self.status_before.to_le_bytes());
+        out[10..14].copy_from_slice(&self.status_after.to_le_bytes());
+        out
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let bytes: &[u8; DRIVER_REPORT_PACKET_LEN] =
+            input.try_into().map_err(|_| DecodeError::InvalidLength)?;
+
+        Ok(Self {
+            sequence: bytes[0],
+            configured: bytes[1] != 0,
+            verify_error_mask: u16::from_le_bytes(bytes[2..4].try_into().unwrap()),
+            transfer_error_mask: u16::from_le_bytes(bytes[4..6].try_into().unwrap()),
+            status_before: u32::from_le_bytes(bytes[6..10].try_into().unwrap()),
+            status_after: u32::from_le_bytes(bytes[10..14].try_into().unwrap()),
         })
     }
 }
@@ -238,6 +276,23 @@ mod tests {
         };
 
         assert_eq!(StatusPacket::decode(&packet.encode()).unwrap(), packet);
+    }
+
+    #[test]
+    fn driver_report_packet_round_trips() {
+        let packet = DriverReportPacket {
+            sequence: 3,
+            configured: true,
+            verify_error_mask: 0x0012,
+            transfer_error_mask: 0x0040,
+            status_before: 0xAABB_CCDD,
+            status_after: 0x1122_3344,
+        };
+
+        assert_eq!(
+            DriverReportPacket::decode(&packet.encode()).unwrap(),
+            packet
+        );
     }
 
     #[test]

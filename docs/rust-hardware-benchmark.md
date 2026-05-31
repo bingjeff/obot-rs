@@ -886,3 +886,89 @@ Current comparison:
 
 The Rust path now includes the earlier motor-control subset, output safety gates, J-Link command/status, and a cold startup DRV8323S SPI status surface. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not applied to HRTIM, bridge outputs remain disabled, DRV8323S register programming is not implemented, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
 
+
+## 2026-05-31: DRV8323S Register Programming With Readback Report, J-Link Debug Readout
+
+Change under test:
+
+- Added the active C++ `motor_hall` DRV8323S register values to Rust: `0x1000`, `0x1BFF`, `0x237F`, `0x2800`, and `0x32C0`.
+- Added a startup programming pass that writes each register, reads the same address back, and compares the low 11 data bits.
+- Added transfer and verification masks plus a 14-byte driver report packet readable through J-Link.
+- Kept PC13 driver enable low and HRTIM outputs disabled.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo test --manifest-path tools/obot-bench-debug/Cargo.toml
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-driver-jlink --address 0x2000007f
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink --address 0x20000020
+```
+
+Release artifact sizes:
+
+```text
+137264 target/thumbv7em-none-eabihf/release/obot-g474
+ 16148 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+`arm-none-eabi-size`:
+
+```text
+   text   data    bss    dec    hex filename
+  16116     32    132  16280   3f98 target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+Exported debug packet addresses for this build:
+
+```text
+OBOT_BENCHMARK_PACKET          0x20000020
+OBOT_COMMAND_PACKET            0x20000071
+OBOT_DRIVER_REPORT_PACKET      0x2000007f
+OBOT_STATUS_PACKET             0x2000008d
+OBOT_COMMAND_PACKET_SEQUENCE   0x2000009c
+```
+
+Driver report readout:
+
+```text
+name, sequence, configured, verify_error_mask, transfer_error_mask, status_before, status_after
+rust_debug, 0, false, 0x001F, 0x0000, 0xFFFFFFFF, 0xFFFFFFFF
+```
+
+Interpretation:
+
+- SPI transfers completed: `transfer_error_mask = 0x0000`.
+- All five configured register readbacks mismatched: `verify_error_mask = 0x001F`.
+- Status before/after both read as `0xFFFFFFFF`.
+- This is consistent with the current safety staging because PC13 remains disabled. The programming/readback machinery is present and observable; successful DRV configuration is deferred to the explicit driver-enable stage.
+
+Representative benchmark after flashing and command verification:
+
+```text
+rust_debug, 903, 4213, 1335, 17008, 410.408, 3399.954, 866.489, 16983.596
+```
+
+Command/status verification at shifted addresses:
+
+```text
+name, sequence, fault, torque_nm, velocity_rad_s, position_rad
+rust_debug, 255, none, 1.25, 0, 0
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `410.408 cycles = 2.414 us`.
+- Main-loop mean execution: `866.489 cycles = 5.097 us`.
+- Combined 100 us max load: `(5 * 903 + 1335) / 17000 = 34.41%`.
+- Combined 100 us mean load: `(5 * 410.408 + 866.489) / 17000 = 17.17%`.
+
+Current comparison:
+
+The Rust path now includes the earlier motor-control subset, output safety gates, J-Link command/status, and DRV8323S register programming/readback reporting. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not applied to HRTIM, bridge outputs remain disabled, successful DRV8323S configuration requires an explicit driver-enable stage, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
+

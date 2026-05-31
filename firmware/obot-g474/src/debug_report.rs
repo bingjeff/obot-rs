@@ -1,8 +1,8 @@
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use obot_protocol::{
-    BENCHMARK_PACKET_LEN, BenchmarkPacket, COMMAND_PACKET_LEN, CommandPacket, STATUS_PACKET_LEN,
-    StatusPacket,
+    BENCHMARK_PACKET_LEN, BenchmarkPacket, COMMAND_PACKET_LEN, CommandPacket,
+    DRIVER_REPORT_PACKET_LEN, DriverReportPacket, STATUS_PACKET_LEN, StatusPacket,
 };
 
 #[unsafe(no_mangle)]
@@ -28,6 +28,15 @@ pub static mut OBOT_STATUS_PACKET: [u8; STATUS_PACKET_LEN] = [0; STATUS_PACKET_L
 #[unsafe(no_mangle)]
 #[used]
 pub static mut OBOT_STATUS_PACKET_SEQUENCE: u8 = 0;
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_DRIVER_REPORT_PACKET: [u8; DRIVER_REPORT_PACKET_LEN] =
+    [0; DRIVER_REPORT_PACKET_LEN];
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_DRIVER_REPORT_PACKET_SEQUENCE: u8 = 0;
 
 pub fn publish(packet: BenchmarkPacket) {
     let encoded = packet.encode();
@@ -89,6 +98,25 @@ pub fn publish_status(packet: StatusPacket) {
     }
 }
 
+pub fn publish_driver_report(packet: DriverReportPacket) {
+    let encoded = packet.encode();
+    let dest = addr_of_mut!(OBOT_DRIVER_REPORT_PACKET).cast::<u8>();
+
+    for (offset, byte) in encoded.iter().copied().enumerate() {
+        // SAFETY: `dest` points to the exported driver report storage. Each byte
+        // index is within the fixed packet length and is written exactly once.
+        unsafe { write_volatile(dest.add(offset), byte) };
+    }
+
+    // SAFETY: This writes the exported sequence byte after the packet bytes.
+    unsafe {
+        write_volatile(
+            addr_of_mut!(OBOT_DRIVER_REPORT_PACKET_SEQUENCE),
+            packet.sequence,
+        );
+    }
+}
+
 pub fn packet_ptr() -> *const u8 {
     addr_of!(OBOT_BENCHMARK_PACKET).cast::<u8>()
 }
@@ -111,4 +139,12 @@ pub fn command_packet_ptr() -> *const u8 {
 
 pub const fn command_packet_len() -> usize {
     COMMAND_PACKET_LEN
+}
+
+pub fn driver_report_packet_ptr() -> *const u8 {
+    addr_of!(OBOT_DRIVER_REPORT_PACKET).cast::<u8>()
+}
+
+pub const fn driver_report_packet_len() -> usize {
+    DRIVER_REPORT_PACKET_LEN
 }
