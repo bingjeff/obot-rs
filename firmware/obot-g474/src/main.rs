@@ -15,8 +15,12 @@ use core::panic::PanicInfo;
 use obot_core::benchmark::{BenchmarkReport, LoopBenchmark};
 use obot_core::{
     Controller, Limits,
-    current::CurrentCalibration,
     timing::{LoopScheduler, LoopTiming},
+};
+#[cfg(target_os = "none")]
+use obot_core::{
+    current::CurrentCalibration,
+    foc::{FocCommand, FocController, FocDesired, FocMeasured, FocParam},
 };
 #[cfg(target_os = "none")]
 use obot_g474::adc::CurrentAdc;
@@ -28,6 +32,9 @@ use obot_g474::hall::HallInputs;
 use obot_g474::pwm::SafeZeroPwm;
 #[cfg(target_os = "none")]
 use obot_protocol::BenchmarkPacket;
+
+#[cfg(target_os = "none")]
+const FAST_LOOP_DT_S: f32 = 1.0 / 50_000.0;
 
 const LIMITS: Limits = Limits {
     max_torque_nm: 2.0,
@@ -76,6 +83,8 @@ fn firmware_main() -> ! {
         },
     };
     let current_calibration = CurrentCalibration::MOTOR_HALL;
+    let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
+    foc.current_mode();
 
     let _ = controller.state();
     core::hint::black_box(pwm.config());
@@ -86,7 +95,19 @@ fn firmware_main() -> ! {
             run_measured_loop(&mut fast_benchmark, &cycle_counter, || {
                 pwm.write_zero_voltage();
                 core::hint::black_box(hall.read_count());
-                core::hint::black_box(current_calibration.convert(current_adc.read_samples()));
+                let currents = current_calibration.convert(current_adc.read_samples());
+                let foc_status = foc.step_with_sincos(
+                    FocCommand {
+                        desired: FocDesired::default(),
+                        measured: FocMeasured {
+                            currents,
+                            motor_electrical_angle: 0.0,
+                        },
+                    },
+                    0.0,
+                    1.0,
+                );
+                core::hint::black_box(foc_status);
                 core::hint::black_box(controller.state());
             });
         }

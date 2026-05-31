@@ -2,6 +2,7 @@
 
 pub mod benchmark;
 pub mod current;
+pub mod foc;
 pub mod hall;
 pub mod timing;
 
