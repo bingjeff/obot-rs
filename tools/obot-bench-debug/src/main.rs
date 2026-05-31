@@ -1154,7 +1154,8 @@ impl DriverCheckUsbOptions {
                 }
                 "--poll-interval-ms" => {
                     index += 1;
-                    options.poll_interval_ms = parse_u32_arg(args.get(index), "--poll-interval-ms")?;
+                    options.poll_interval_ms =
+                        parse_u32_arg(args.get(index), "--poll-interval-ms")?;
                 }
                 "--reset-settle-ms" => {
                     index += 1;
@@ -1380,10 +1381,8 @@ fn read_usb_run_stats(options: &UsbRunStatsOptions) -> Result<UsbRunStats, Strin
 
     let mut stats = UsbRunStatsAccumulator::default();
     for _ in 0..options.samples {
-        let fast_cycles = text_api_usb_u32_on_file(&file, "t_exec_fastloop", options.timeout_ms)?;
-        let fast_period = text_api_usb_u32_on_file(&file, "t_period_fastloop", options.timeout_ms)?;
-        let main_cycles = text_api_usb_u32_on_file(&file, "t_exec_mainloop", options.timeout_ms)?;
-        let main_period = text_api_usb_u32_on_file(&file, "t_period_mainloop", options.timeout_ms)?;
+        let (fast_cycles, fast_period, main_cycles, main_period) =
+            text_api_usb_benchmark_sample_on_file(&file, options.timeout_ms)?;
         stats.push(fast_cycles, fast_period, main_cycles, main_period);
     }
 
@@ -1396,6 +1395,35 @@ fn open_usb_device(path: &Path) -> Result<fs::File, String> {
         .write(true)
         .open(path)
         .map_err(|error| format!("failed to open `{}`: {error}", path.display()))
+}
+
+fn text_api_usb_benchmark_sample_on_file(
+    file: &fs::File,
+    timeout_ms: u32,
+) -> Result<(u32, u32, u32, u32), String> {
+    let response = text_api_usb_request_on_file(file, "benchmark_sample", timeout_ms)?;
+    let mut fields = response.trim().split(',');
+    let fast_cycles = parse_benchmark_sample_field(fields.next(), "fast cycles", &response)?;
+    let fast_period = parse_benchmark_sample_field(fields.next(), "fast period", &response)?;
+    let main_cycles = parse_benchmark_sample_field(fields.next(), "main cycles", &response)?;
+    let main_period = parse_benchmark_sample_field(fields.next(), "main period", &response)?;
+    if fields.next().is_some() {
+        return Err(format!(
+            "text API `benchmark_sample` returned too many fields: `{response}`"
+        ));
+    }
+    Ok((fast_cycles, fast_period, main_cycles, main_period))
+}
+
+fn parse_benchmark_sample_field(
+    field: Option<&str>,
+    name: &str,
+    response: &str,
+) -> Result<u32, String> {
+    field
+        .ok_or_else(|| format!("text API `benchmark_sample` omitted {name}: `{response}`"))?
+        .parse()
+        .map_err(|_| format!("text API `benchmark_sample` returned invalid {name}: `{response}`"))
 }
 
 fn text_api_usb_u32_on_file(
@@ -3646,11 +3674,9 @@ mod tests {
 
     #[test]
     fn rejects_zero_driver_check_poll_interval() {
-        let error = DriverCheckUsbOptions::parse(&[
-            "--poll-interval-ms".to_string(),
-            "0".to_string(),
-        ])
-        .unwrap_err();
+        let error =
+            DriverCheckUsbOptions::parse(&["--poll-interval-ms".to_string(), "0".to_string()])
+                .unwrap_err();
 
         assert_eq!(error, "--poll-interval-ms must be nonzero");
     }

@@ -10,7 +10,11 @@ mod debug_report;
 mod startup;
 
 #[cfg(target_os = "none")]
-use core::{cell::UnsafeCell, panic::PanicInfo};
+use core::{
+    cell::UnsafeCell,
+    panic::PanicInfo,
+    sync::atomic::{AtomicU32, Ordering},
+};
 #[cfg(any(target_os = "none", test))]
 use obot_core::ControlMode;
 #[cfg(target_os = "none")]
@@ -34,7 +38,7 @@ use obot_core::{
 #[cfg(target_os = "none")]
 use obot_g474::adc::CurrentAdc;
 #[cfg(target_os = "none")]
-use obot_g474::cycle_counter::{CycleCounter, DwtCycleCounter};
+use obot_g474::cycle_counter::CycleCounter;
 #[cfg(target_os = "none")]
 use obot_g474::driver::MotorDriverPins;
 #[cfg(target_os = "none")]
@@ -54,6 +58,8 @@ const FAST_LOOP_DT_S: f32 = 1.0 / 50_000.0;
 #[cfg(target_os = "none")]
 const FAST_LOOP_PERIOD_CYCLES: u32 = 3_400;
 #[cfg(target_os = "none")]
+const MAIN_LOOP_FAST_TICKS: u32 = 5;
+#[cfg(target_os = "none")]
 const SYSTICK_CSR: *mut u32 = 0xE000_E010 as *mut u32;
 #[cfg(target_os = "none")]
 const SYSTICK_RVR: *mut u32 = 0xE000_E014 as *mut u32;
@@ -67,6 +73,8 @@ const SYSTICK_CSR_TICKINT: u32 = 1 << 1;
 const SYSTICK_CSR_CLKSOURCE_PROCESSOR: u32 = 1 << 2;
 #[cfg(target_os = "none")]
 const HOST_COMMAND_TIMEOUT_MAIN_TICKS: u32 = 1_000;
+#[cfg(target_os = "none")]
+const DRIVER_ENABLE_SETTLE_MAIN_TICKS: u16 = 100;
 #[cfg(target_os = "none")]
 const BRIDGE_PREARM_BUS_BLOCKED_BIT: u32 = 1 << 0;
 #[cfg(target_os = "none")]
@@ -105,7 +113,7 @@ fn main() {
 
 #[cfg(target_os = "none")]
 fn firmware_main() -> ! {
-    let mut scheduler = scheduler();
+    let mut next_main_fast_tick = MAIN_LOOP_FAST_TICKS;
     let mut main_benchmark = LoopBenchmark::new();
     let mut benchmark_sequence = 0;
     let mut status_sequence = 0;
@@ -116,6 +124,7 @@ fn firmware_main() -> ! {
     let mut bus_voltage_sequence = 0;
     let mut text_api_request_sequence = 0;
     let mut last_driver_report = Drv8323sConfigReport::default();
+    let mut driver_debug_service = DriverDebugService::default();
     let mut last_benchmark_report = BenchmarkReport::default();
     let mut host_watchdog = HostCommandWatchdog::new(HOST_COMMAND_TIMEOUT_MAIN_TICKS);
     if clock::configure_170mhz_hsi().is_err() {
@@ -130,8 +139,7 @@ fn firmware_main() -> ! {
     }
     let usb = obot_g474::usb::UsbDevice::prepare_disconnected();
 
-    let cycle_counter = DwtCycleCounter::new();
-    cycle_counter.enable();
+    let cycle_counter = SysTickCycleCounter;
     let driver = MotorDriverPins::init_motor_hall_disabled();
     let driver_spi = Drv8323s::init_motor_hall();
     let pwm = SafeZeroPwm::init_motor_hall();
@@ -169,8 +177,7 @@ fn firmware_main() -> ! {
     start_fast_loop_interrupt();
 
     loop {
-        let poll = scheduler.poll(cycle_counter.now());
-        if poll.main {
+        if main_loop_due(&mut next_main_fast_tick) {
             let mut driver_action_completed = false;
             run_preemptible_main_loop(&mut main_benchmark, &cycle_counter, || {
                 let host_poll = service_host_debug(&mut command_sequence);
@@ -183,10 +190,9 @@ fn firmware_main() -> ! {
                 foc_desired = foc_map.desired_from_state(controller_state);
                 publish_status_report(status_sequence, controller_state);
                 status_sequence = status_sequence.wrapping_add(1);
-                if let Some(report) = service_driver_debug(
+                if let Some(report) = driver_debug_service.service(
                     &driver,
                     &driver_spi,
-                    &cycle_counter,
                     &mut driver_command_sequence,
                     &mut driver_report_sequence,
                 ) {
@@ -241,9 +247,7 @@ fn firmware_main() -> ! {
                 benchmark_sequence =
                     publish_benchmark_report(benchmark_sequence, last_benchmark_report);
             }
-        }
-
-        if !poll.main {
+        } else {
             core::hint::spin_loop();
         }
     }
@@ -269,6 +273,33 @@ static OUTPUT_SAFETY: OutputSafetyStorage =
     OutputSafetyStorage(UnsafeCell::new(OutputSafety::new()));
 
 #[cfg(target_os = "none")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SysTickCycleCounter;
+
+#[cfg(target_os = "none")]
+impl CycleCounter for SysTickCycleCounter {
+    fn now(&self) -> u32 {
+        systick_cycles_now()
+    }
+}
+
+#[cfg(target_os = "none")]
+fn systick_cycles_now() -> u32 {
+    loop {
+        let ticks_before = FAST_LOOP_TICKS.load(Ordering::Relaxed);
+        let current = unsafe { core::ptr::read_volatile(SYSTICK_CVR) };
+        let ticks_after = FAST_LOOP_TICKS.load(Ordering::Relaxed);
+        if ticks_before == ticks_after {
+            let elapsed_in_period = (FAST_LOOP_PERIOD_CYCLES - 1)
+                .saturating_sub(current.min(FAST_LOOP_PERIOD_CYCLES - 1));
+            return ticks_after
+                .wrapping_mul(FAST_LOOP_PERIOD_CYCLES)
+                .wrapping_add(elapsed_in_period);
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
 struct FastLoopStorage(UnsafeCell<Option<FastLoopContext>>);
 
 #[cfg(target_os = "none")]
@@ -278,9 +309,12 @@ unsafe impl Sync for FastLoopStorage {}
 static FAST_LOOP: FastLoopStorage = FastLoopStorage(UnsafeCell::new(None));
 
 #[cfg(target_os = "none")]
+static FAST_LOOP_TICKS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_os = "none")]
 struct FastLoopContext {
     benchmark: LoopBenchmark,
-    cycle_counter: DwtCycleCounter,
+    cycle_counter: SysTickCycleCounter,
     pwm: SafeZeroPwm,
     hall: HallInputs,
     current_adc: CurrentAdc,
@@ -294,7 +328,7 @@ struct FastLoopContext {
 #[cfg(target_os = "none")]
 impl FastLoopContext {
     fn new(
-        cycle_counter: DwtCycleCounter,
+        cycle_counter: SysTickCycleCounter,
         pwm: SafeZeroPwm,
         hall: HallInputs,
         current_adc: CurrentAdc,
@@ -365,9 +399,24 @@ fn start_fast_loop_interrupt() {
 
 #[cfg(target_os = "none")]
 fn fast_loop_interrupt() {
+    FAST_LOOP_TICKS.fetch_add(1, Ordering::Relaxed);
     if let Some(context) = fast_loop_context_mut() {
         context.run();
     }
+}
+
+#[cfg(target_os = "none")]
+fn main_loop_due(next_main_fast_tick: &mut u32) -> bool {
+    let ticks = FAST_LOOP_TICKS.load(Ordering::Relaxed);
+    if (ticks.wrapping_sub(*next_main_fast_tick) as i32) < 0 {
+        return false;
+    }
+
+    let elapsed = ticks.wrapping_sub(*next_main_fast_tick);
+    let periods_elapsed = elapsed / MAIN_LOOP_FAST_TICKS + 1;
+    *next_main_fast_tick =
+        next_main_fast_tick.wrapping_add(MAIN_LOOP_FAST_TICKS.wrapping_mul(periods_elapsed));
+    true
 }
 
 #[cfg(target_os = "none")]
@@ -819,47 +868,83 @@ fn bool_mask(value: bool, bit: u32) -> u32 {
 }
 
 #[cfg(target_os = "none")]
-#[cold]
-#[inline(never)]
-fn service_driver_debug(
-    driver: &MotorDriverPins,
-    driver_spi: &Drv8323s,
-    cycle_counter: &impl CycleCounter,
-    command_sequence: &mut u8,
-    report_sequence: &mut u8,
-) -> Option<Drv8323sConfigReport> {
-    let packet = obot_g474::usb::poll_driver_command()
-        .or_else(|| debug_report::poll_driver_command(command_sequence))?;
-
-    let report = match packet.command {
-        DriverCommand::Disable => {
-            driver.disable();
-            Drv8323sConfigReport::default()
-        }
-        DriverCommand::ConfigureEnable => {
-            driver.enable();
-            wait_cycles(cycle_counter, 1_700_000);
-            let report = driver_spi.configure_motor_hall_registers();
-            if !report.configured() {
-                driver.disable();
-            }
-            report
-        }
-    };
-
-    publish_driver_report(*report_sequence, report);
-    *report_sequence = (*report_sequence).wrapping_add(1);
-    core::hint::black_box((packet.command, report.configured()));
-    Some(report)
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DriverDebugService {
+    pending: Option<PendingDriverAction>,
 }
 
 #[cfg(target_os = "none")]
-#[cold]
-#[inline(never)]
-fn wait_cycles(cycle_counter: &impl CycleCounter, cycles: u32) {
-    let start = cycle_counter.now();
-    while cycle_counter.now().wrapping_sub(start) < cycles {
-        core::hint::spin_loop();
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingDriverAction {
+    ConfigureEnable { settle_ticks_remaining: u16 },
+}
+
+#[cfg(target_os = "none")]
+impl DriverDebugService {
+    #[cold]
+    #[inline(never)]
+    fn service(
+        &mut self,
+        driver: &MotorDriverPins,
+        driver_spi: &Drv8323s,
+        command_sequence: &mut u8,
+        report_sequence: &mut u8,
+    ) -> Option<Drv8323sConfigReport> {
+        if let Some(packet) = obot_g474::usb::poll_driver_command()
+            .or_else(|| debug_report::poll_driver_command(command_sequence))
+        {
+            return match packet.command {
+                DriverCommand::Disable => {
+                    self.pending = None;
+                    driver.disable();
+                    let report = Drv8323sConfigReport::default();
+                    self.publish_report(report_sequence, report);
+                    core::hint::black_box((packet.command, report.configured()));
+                    Some(report)
+                }
+                DriverCommand::ConfigureEnable => {
+                    driver.enable();
+                    self.pending = Some(PendingDriverAction::ConfigureEnable {
+                        settle_ticks_remaining: DRIVER_ENABLE_SETTLE_MAIN_TICKS,
+                    });
+                    core::hint::black_box(packet.command);
+                    None
+                }
+            };
+        }
+
+        self.service_pending(driver, driver_spi, report_sequence)
+    }
+
+    fn service_pending(
+        &mut self,
+        driver: &MotorDriverPins,
+        driver_spi: &Drv8323s,
+        report_sequence: &mut u8,
+    ) -> Option<Drv8323sConfigReport> {
+        match self.pending.as_mut()? {
+            PendingDriverAction::ConfigureEnable {
+                settle_ticks_remaining,
+            } if *settle_ticks_remaining > 0 => {
+                *settle_ticks_remaining -= 1;
+                None
+            }
+            PendingDriverAction::ConfigureEnable { .. } => {
+                self.pending = None;
+                let report = driver_spi.configure_motor_hall_registers();
+                if !report.configured() {
+                    driver.disable();
+                }
+                self.publish_report(report_sequence, report);
+                Some(report)
+            }
+        }
+    }
+
+    fn publish_report(&self, report_sequence: &mut u8, report: Drv8323sConfigReport) {
+        publish_driver_report(*report_sequence, report);
+        *report_sequence = (*report_sequence).wrapping_add(1);
+        core::hint::black_box(report.configured());
     }
 }
 
@@ -993,15 +1078,24 @@ fn run_preemptible_main_loop(
     cycle_counter: &impl CycleCounter,
     work: impl FnOnce(),
 ) {
-    let (sample, fast_cycles_before) = interrupt_free(|| {
+    let (sample, fast_cycles_before, usb_interrupts_before) = interrupt_free(|| {
         (
             benchmark.start(cycle_counter.now()),
             fast_loop_execution_total_cycles(),
+            obot_g474::usb::interrupt_count(),
         )
     });
     work();
-    let (now_cycles, fast_cycles_after) =
-        interrupt_free(|| (cycle_counter.now(), fast_loop_execution_total_cycles()));
+    let (now_cycles, fast_cycles_after, usb_interrupts_after) = interrupt_free(|| {
+        (
+            cycle_counter.now(),
+            fast_loop_execution_total_cycles(),
+            obot_g474::usb::interrupt_count(),
+        )
+    });
+    if usb_interrupts_after != usb_interrupts_before {
+        return;
+    }
     let elapsed_cycles = now_cycles.wrapping_sub(sample.start_cycles());
     let fast_cycles = fast_cycles_after.saturating_sub(fast_cycles_before);
     let exclusive_cycles =

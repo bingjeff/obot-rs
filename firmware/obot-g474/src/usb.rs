@@ -184,6 +184,10 @@ impl UsbDevice {
     }
 }
 
+pub fn interrupt_count() -> u32 {
+    USB_LP_INTERRUPT_COUNT.load(Ordering::Relaxed)
+}
+
 pub fn interrupt() {
     USB_LP_INTERRUPT_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -501,6 +505,7 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "api_name",
     "cpu_frequency",
     "messages_version",
+    "benchmark_sample",
     "t_exec_fastloop",
     "t_period_fastloop",
     "t_exec_mainloop",
@@ -567,6 +572,7 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
     match request {
         b"cpu_frequency" => write_u32_decimal(170_000_000, output),
         b"messages_version" => write_bytes(b"3.3", output),
+        b"benchmark_sample" => write_benchmark_sample(output),
         b"t_exec_fastloop" => {
             write_u32_decimal(BENCH_T_EXEC_FASTLOOP.load(Ordering::Relaxed), output)
         }
@@ -669,6 +675,28 @@ fn parse_decimal_usize(input: &[u8]) -> Option<usize> {
         value = value.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
     }
     Some(value)
+}
+
+fn write_benchmark_sample(output: &mut [u8]) -> Option<usize> {
+    let values = [
+        BENCH_T_EXEC_FASTLOOP.load(Ordering::Relaxed),
+        BENCH_T_PERIOD_FASTLOOP.load(Ordering::Relaxed),
+        BENCH_T_EXEC_MAINLOOP.load(Ordering::Relaxed),
+        BENCH_T_PERIOD_MAINLOOP.load(Ordering::Relaxed),
+    ];
+    let mut len = 0;
+    for (index, value) in values.into_iter().enumerate() {
+        if index != 0 {
+            if len >= output.len() {
+                return None;
+            }
+            output[len] = b',';
+            len += 1;
+        }
+        let written = write_u32_decimal(value, &mut output[len..])?;
+        len += written;
+    }
+    Some(len)
 }
 
 fn write_bool(value: bool, output: &mut [u8]) -> Option<usize> {

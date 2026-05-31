@@ -11,8 +11,10 @@ impl DwtCycleCounter {
     const DEMCR: *mut u32 = 0xE000_EDFC as *mut u32;
     const DWT_CTRL: *mut u32 = 0xE000_1000 as *mut u32;
     const DWT_CYCCNT: *mut u32 = 0xE000_1004 as *mut u32;
+    const DWT_LAR: *mut u32 = 0xE000_1FB0 as *mut u32;
     const DEMCR_TRCENA: u32 = 1 << 24;
     const DWT_CTRL_CYCCNTENA: u32 = 1;
+    const DWT_LAR_UNLOCK: u32 = 0xC5AC_CE55;
 
     pub const fn new() -> Self {
         Self
@@ -20,6 +22,7 @@ impl DwtCycleCounter {
 
     pub fn enable(self) {
         self.enable_trace();
+        self.unlock();
         self.reset();
         self.enable_counter();
     }
@@ -36,6 +39,13 @@ impl DwtCycleCounter {
         let demcr = unsafe { read_volatile(Self::DEMCR) };
         // SAFETY: See the read above; volatile write is required for MMIO.
         unsafe { write_volatile(Self::DEMCR, demcr | Self::DEMCR_TRCENA) };
+    }
+
+    fn unlock(self) {
+        // SAFETY: `DWT_LAR` is the ARM DWT lock access register on cores that
+        // implement it. Writing the unlock key is required on STM32G4 before
+        // `CYCCNT` reliably advances after reset.
+        unsafe { write_volatile(Self::DWT_LAR, Self::DWT_LAR_UNLOCK) };
     }
 
     fn enable_counter(self) {
