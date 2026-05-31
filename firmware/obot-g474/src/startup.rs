@@ -4,10 +4,16 @@ const INITIAL_STACK: usize = 0x2000_0000 + 96 * 1024;
 const SCB_CPACR: usize = 0xE000_ED88;
 const FPU_CP10_CP11_FULL_ACCESS: u32 = (0b11 << 20) | (0b11 << 22);
 
+type Handler = extern "C" fn();
+type ResetHandler = extern "C" fn() -> !;
+
 #[repr(C)]
 struct VectorTable {
     initial_stack: usize,
-    reset: extern "C" fn() -> !,
+    reset: ResetHandler,
+    exceptions: [Handler; 14],
+    irqs_before_usb_lp: [Handler; 20],
+    usb_lp: Handler,
 }
 
 unsafe extern "C" {
@@ -23,6 +29,9 @@ unsafe extern "C" {
 static VECTOR_TABLE: VectorTable = VectorTable {
     initial_stack: INITIAL_STACK,
     reset: Reset,
+    exceptions: [default_handler; 14],
+    irqs_before_usb_lp: [default_handler; 20],
+    usb_lp: usb_lp_handler,
 };
 
 #[unsafe(no_mangle)]
@@ -30,6 +39,16 @@ pub extern "C" fn Reset() -> ! {
     enable_fpu();
     init_memory();
     super::firmware_main();
+}
+
+extern "C" fn default_handler() {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+extern "C" fn usb_lp_handler() {
+    obot_g474::usb::interrupt();
 }
 
 fn enable_fpu() {

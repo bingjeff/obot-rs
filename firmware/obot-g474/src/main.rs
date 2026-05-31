@@ -101,6 +101,7 @@ fn firmware_main() -> ! {
             core::hint::spin_loop();
         }
     }
+    let _usb = obot_g474::usb::UsbDevice::prepare_disconnected();
 
     let cycle_counter = DwtCycleCounter::new();
     cycle_counter.enable();
