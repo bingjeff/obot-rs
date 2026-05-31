@@ -49,6 +49,12 @@ To inspect the raw bus-voltage sample behind the `bus_blocked` gate:
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-bus-voltage-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474
 ```
 
+For bring-up, the combined snapshot reads benchmark, status, driver, output-safety, and bus-voltage packets through the ELF symbol table and reports the 100 us combined load plus remaining cycle headroom:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- snapshot-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474
+```
+
 To clear a latched controller fault through the debug command packet, use the explicit clear-faults mode:
 
 ```sh

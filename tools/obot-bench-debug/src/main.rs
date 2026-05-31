@@ -20,6 +20,8 @@ const DEFAULT_DEVICE: &str = "STM32G474RE";
 const DEFAULT_ADDRESS: u32 = 0x2000_0000;
 const DEFAULT_SPEED_KHZ: u32 = 4_000;
 const DEFAULT_ELF_PATH: &str = "target/thumbv7em-none-eabihf/release/obot-g474";
+const CYCLES_PER_100_US: u64 = 17_000;
+const FAST_LOOPS_PER_MAIN_LOOP: u64 = 5;
 const BENCHMARK_PACKET_SYMBOL: &str = "OBOT_BENCHMARK_PACKET";
 const BUS_VOLTAGE_PACKET_SYMBOL: &str = "OBOT_BUS_VOLTAGE_PACKET";
 const COMMAND_PACKET_SYMBOL: &str = "OBOT_COMMAND_PACKET";
@@ -65,6 +67,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "read-driver-jlink" => read_driver_jlink_command(rest),
         "read-output-safety-jlink" => read_output_safety_jlink_command(rest),
         "read-bus-voltage-jlink" => read_bus_voltage_jlink_command(rest),
+        "snapshot-jlink" => snapshot_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
         "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
         "jlink-script" => jlink_script_command(rest),
@@ -196,6 +199,59 @@ fn read_bus_voltage_jlink_command(args: &[String]) -> Result<String, String> {
     let jlink = options.resolve(BUS_VOLTAGE_PACKET_SYMBOL)?;
     let bytes = read_jlink_bytes(&jlink, BUS_VOLTAGE_PACKET_LEN)?;
     decode_bus_voltage_csv(&bytes)
+}
+
+fn snapshot_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = SymbolReadOptions::parse(args)?;
+    if options.address.is_some() {
+        return Err("snapshot-jlink reads multiple symbols; use --elf instead of --address".to_string());
+    }
+
+    let benchmark = decode_packet(&read_symbol_bytes(
+        &options,
+        BENCHMARK_PACKET_SYMBOL,
+        BENCHMARK_PACKET_LEN,
+    )?)?;
+    let status = decode_status_packet(&read_symbol_bytes(
+        &options,
+        STATUS_PACKET_SYMBOL,
+        STATUS_PACKET_LEN,
+    )?)?;
+    let driver = decode_driver_report_packet(&read_symbol_bytes(
+        &options,
+        DRIVER_REPORT_PACKET_SYMBOL,
+        DRIVER_REPORT_PACKET_LEN,
+    )?)?;
+    let output_safety = decode_output_safety_packet(&read_symbol_bytes(
+        &options,
+        OUTPUT_SAFETY_PACKET_SYMBOL,
+        OUTPUT_SAFETY_PACKET_LEN,
+    )?)?;
+    let bus_voltage = decode_bus_voltage_packet(&read_symbol_bytes(
+        &options,
+        BUS_VOLTAGE_PACKET_SYMBOL,
+        BUS_VOLTAGE_PACKET_LEN,
+    )?)?;
+
+    Ok(format_snapshot_csv(
+        DEFAULT_NAME,
+        DebugSnapshot {
+            benchmark,
+            status,
+            driver,
+            output_safety,
+            bus_voltage,
+        },
+    ))
+}
+
+fn read_symbol_bytes(
+    options: &SymbolReadOptions,
+    symbol: &str,
+    len: usize,
+) -> Result<Vec<u8>, String> {
+    let jlink = options.resolve(symbol)?;
+    read_jlink_bytes(&jlink, len)
 }
 
 fn read_jlink_bytes(options: &JlinkOptions, len: usize) -> Result<Vec<u8>, String> {
@@ -945,6 +1001,81 @@ fn decode_bus_voltage_packet(bytes: &[u8]) -> Result<BusVoltagePacket, String> {
     BusVoltagePacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DebugSnapshot {
+    benchmark: BenchmarkPacket,
+    status: StatusPacket,
+    driver: DriverReportPacket,
+    output_safety: OutputSafetyPacket,
+    bus_voltage: BusVoltagePacket,
+}
+
+fn format_snapshot_csv(name: &str, snapshot: DebugSnapshot) -> String {
+    let report = snapshot.benchmark.report;
+    let status = snapshot.output_safety.status;
+    let bus_sample = BusVoltageCalibration::MOTOR_HALL.convert(snapshot.bus_voltage.raw);
+    let bus_allows_output = OutputGate::MOTOR_HALL.allows_output_raw(snapshot.bus_voltage.raw);
+    let combined_max_cycles = FAST_LOOPS_PER_MAIN_LOOP * report.max_fast_loop_cycles() as u64
+        + report.max_main_loop_cycles() as u64;
+    let combined_max_remaining_cycles = CYCLES_PER_100_US as i64 - combined_max_cycles as i64;
+    let combined_mean_milli_cycles = FAST_LOOPS_PER_MAIN_LOOP
+        * report.mean_fast_loop_cycles_milli_cycles()
+        + report.mean_main_loop_cycles_milli_cycles();
+    let combined_mean_remaining_milli_cycles =
+        CYCLES_PER_100_US as i64 * 1_000 - combined_mean_milli_cycles as i64;
+
+    format!(
+        "name, benchmark_sequence, status_sequence, driver_sequence, output_safety_sequence, bus_voltage_sequence, max_fast_loop_cycles, max_fast_loop_period, fast_max_load_percent, fast_max_remaining_cycles, max_main_loop_cycles, max_main_loop_period, main_max_load_percent, main_max_remaining_cycles, combined_max_cycles, combined_max_load_percent, combined_max_remaining_cycles, mean_fast_loop_cycles, mean_main_loop_cycles, combined_mean_cycles, combined_mean_load_percent, combined_mean_remaining_cycles, fault, output_allowed, command_blocked, bus_blocked, driver_not_enabled, driver_fault_latched, controller_faulted, host_timed_out, bus_voltage_raw, bus_voltage_volts, bus_allows_output, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, torque_nm, velocity_rad_s, position_rad\n{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {:.3}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}\n",
+        name,
+        snapshot.benchmark.sequence,
+        snapshot.status.sequence,
+        snapshot.driver.sequence,
+        snapshot.output_safety.sequence,
+        snapshot.bus_voltage.sequence,
+        report.max_fast_loop_cycles(),
+        report.max_fast_loop_period_cycles(),
+        format_percent(
+            report.max_fast_loop_cycles() as u64,
+            report.max_fast_loop_period_cycles() as u64,
+        ),
+        report.max_fast_loop_period_cycles() as i64 - report.max_fast_loop_cycles() as i64,
+        report.max_main_loop_cycles(),
+        report.max_main_loop_period_cycles(),
+        format_percent(
+            report.max_main_loop_cycles() as u64,
+            report.max_main_loop_period_cycles() as u64,
+        ),
+        report.max_main_loop_period_cycles() as i64 - report.max_main_loop_cycles() as i64,
+        combined_max_cycles,
+        format_percent(combined_max_cycles, CYCLES_PER_100_US),
+        combined_max_remaining_cycles,
+        format_milli_cycles(report.mean_fast_loop_cycles_milli_cycles()),
+        format_milli_cycles(report.mean_main_loop_cycles_milli_cycles()),
+        format_milli_cycles(combined_mean_milli_cycles),
+        format_milli_percent(combined_mean_milli_cycles, CYCLES_PER_100_US),
+        format_signed_milli_cycles(combined_mean_remaining_milli_cycles),
+        format_fault(snapshot.status.state.fault),
+        status.output_allowed,
+        status.command_blocked,
+        status.bus_blocked,
+        status.driver_not_enabled,
+        status.driver_fault_latched,
+        status.controller_faulted,
+        status.host_timed_out,
+        snapshot.bus_voltage.raw,
+        bus_sample.volts,
+        bus_allows_output,
+        snapshot.driver.configured,
+        snapshot.driver.verify_error_mask,
+        snapshot.driver.transfer_error_mask,
+        snapshot.driver.status_before,
+        snapshot.driver.status_after,
+        snapshot.status.state.torque_nm,
+        snapshot.status.state.velocity_rad_s,
+        snapshot.status.state.position_rad,
+    )
+}
+
 fn format_status_csv(name: &str, packet: StatusPacket) -> String {
     format!(
         "name, sequence, fault, torque_nm, velocity_rad_s, position_rad\n{}, {}, {}, {}, {}, {}\n",
@@ -1073,6 +1204,36 @@ fn format_milli_cycles(value: u64) -> String {
     out
 }
 
+fn format_signed_milli_cycles(value: i64) -> String {
+    if value < 0 {
+        format!("-{}", format_milli_cycles(value.unsigned_abs()))
+    } else {
+        format_milli_cycles(value as u64)
+    }
+}
+
+fn format_percent(numerator_cycles: u64, denominator_cycles: u64) -> String {
+    if denominator_cycles == 0 {
+        return "nan".to_string();
+    }
+
+    format!(
+        "{:.2}",
+        numerator_cycles as f64 * 100.0 / denominator_cycles as f64
+    )
+}
+
+fn format_milli_percent(numerator_milli_cycles: u64, denominator_cycles: u64) -> String {
+    if denominator_cycles == 0 {
+        return "nan".to_string();
+    }
+
+    format!(
+        "{:.2}",
+        numerator_milli_cycles as f64 * 100.0 / (denominator_cycles as f64 * 1_000.0)
+    )
+}
+
 fn parse_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     for token in
@@ -1149,6 +1310,7 @@ fn usage() -> String {
   obot-bench-debug read-driver-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <driver-report-address>] [--speed 4000]
   obot-bench-debug read-output-safety-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <output-safety-address>] [--speed 4000]
   obot-bench-debug read-bus-voltage-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <bus-voltage-address>] [--speed 4000]
+  obot-bench-debug snapshot-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--speed 4000]
   obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
 ",
@@ -1394,6 +1556,65 @@ mod tests {
             output,
             "name, sequence, bus_voltage_raw, bus_voltage_volts, bus_allows_output\nrust, 6, 1963, 8.000, true\n"
         );
+    }
+
+    #[test]
+    fn formats_combined_snapshot_csv() {
+        let output = format_snapshot_csv(
+            "rust",
+            DebugSnapshot {
+                benchmark: sample_packet(),
+                status: StatusPacket {
+                    sequence: 3,
+                    state: obot_core::MotorState {
+                        torque_nm: 1.25,
+                        velocity_rad_s: 0.0,
+                        position_rad: -0.5,
+                        fault: Some(obot_core::Fault::TorqueLimit),
+                    },
+                },
+                driver: DriverReportPacket {
+                    sequence: 4,
+                    configured: false,
+                    verify_error_mask: 0x0012,
+                    transfer_error_mask: 0x0040,
+                    status_before: 0xAABB_CCDD,
+                    status_after: 0x1122_3344,
+                },
+                output_safety: OutputSafetyPacket {
+                    sequence: 5,
+                    status: obot_core::output::OutputSafetyStatus {
+                        output_allowed: false,
+                        command_blocked: true,
+                        bus_blocked: true,
+                        driver_not_enabled: true,
+                        driver_fault_latched: false,
+                        controller_faulted: true,
+                        host_timed_out: true,
+                    },
+                },
+                bus_voltage: BusVoltagePacket {
+                    sequence: 6,
+                    raw: OutputGate::MOTOR_HALL.min_raw,
+                },
+            },
+        );
+
+        assert!(output.starts_with("name, benchmark_sequence, status_sequence"));
+        assert!(output.contains("combined_mean_load_percent"));
+        assert!(output.contains(", combined_max_remaining_cycles,"));
+        assert!(output.contains("rust, 9, 3, 4, 5, 6, 710, 3416, 20.78, 2706, 6445, 17045, 37.81, 10600, 9995, 58.79, 7005, 708.965, 3555.49, 7100.315, 41.77, 9899.685, torque_limit, false, true, true, true, false, true, true, 1963, 8.000, true, false, 0x0012, 0x0040, 0xAABBCCDD, 0x11223344, 1.25, 0, -0.5\n"));
+    }
+
+    #[test]
+    fn snapshot_jlink_rejects_single_address_override() {
+        let error = snapshot_jlink_command(&[
+            "--address".to_string(),
+            "0x20000020".to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(error.contains("reads multiple symbols"));
     }
 
     #[test]
