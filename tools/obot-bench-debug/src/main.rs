@@ -803,6 +803,7 @@ struct DriverCheckUsbOptions {
     poll_interval_ms: u32,
     reset_settle_ms: u32,
     expectation: DriverCheckExpectation,
+    leave_driver_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1118,6 +1119,7 @@ impl DriverCheckUsbOptions {
             poll_interval_ms: DEFAULT_USB_DRIVER_CHECK_POLL_MS,
             reset_settle_ms: DEFAULT_USB_DRIVER_CHECK_RESET_MS,
             expectation: DriverCheckExpectation::None,
+            leave_driver_enabled: false,
         };
 
         let mut index = 0;
@@ -1167,6 +1169,9 @@ impl DriverCheckUsbOptions {
                         .get(index)
                         .ok_or_else(|| "--expect requires a value".to_string())?;
                     options.expectation = parse_driver_check_expectation(expectation)?;
+                }
+                "--leave-driver-enabled" => {
+                    options.leave_driver_enabled = true;
                 }
                 other => return Err(format!("unknown option `{other}`")),
             }
@@ -1554,6 +1559,17 @@ fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckRes
         fields,
         report_observed,
     );
+
+    if options.command.command == DriverCommand::ConfigureEnable && !options.leave_driver_enabled {
+        let mut disable = options.command.clone();
+        disable.sequence = disable.sequence.wrapping_add(1);
+        disable.command = DriverCommand::Disable;
+        let disable_packet = DriverCommandPacket {
+            sequence: disable.sequence,
+            command: disable.command,
+        };
+        transact_driver_command_usb(&disable, disable_packet)?;
+    }
 
     Ok(UsbDriverCheckResult {
         command: options.command.command,
@@ -3064,7 +3080,7 @@ fn usage() -> String {
   obot-bench-debug write-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad] [--timeout-ms N]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
   obot-bench-debug write-driver-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command disable|configure-enable] [--timeout-ms N]
-  obot-bench-debug check-driver-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command configure-enable|disable] [--expect none|unpowered-fail-closed|powered-ready] [--timeout-ms N] [--poll-timeout-ms N]
+  obot-bench-debug check-driver-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command configure-enable|disable] [--expect none|unpowered-fail-closed|powered-ready] [--timeout-ms N] [--poll-timeout-ms N] [--leave-driver-enabled]
 ",
         BENCHMARK_PACKET_LEN,
         BENCHMARK_PACKET_LEN,
@@ -3656,6 +3672,7 @@ mod tests {
             "75".to_string(),
             "--expect".to_string(),
             "powered-ready".to_string(),
+            "--leave-driver-enabled".to_string(),
         ])
         .unwrap();
 
@@ -3670,6 +3687,7 @@ mod tests {
         assert_eq!(options.poll_interval_ms, 25);
         assert_eq!(options.reset_settle_ms, 75);
         assert_eq!(options.expectation, DriverCheckExpectation::PoweredReady);
+        assert!(options.leave_driver_enabled);
     }
 
     #[test]
