@@ -7,6 +7,7 @@ use std::{
 use obot_core::{
     ControlMode, MotorCommand,
     power::{BusVoltageCalibration, OutputGate},
+    text_api::{ApiCatalog, ApiDispatchError, ApiEntry, ApiValue},
 };
 use obot_protocol::{
     BENCHMARK_PACKET_LEN, BUS_VOLTAGE_PACKET_LEN, BenchmarkPacket, BusVoltagePacket,
@@ -68,6 +69,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "read-output-safety-jlink" => read_output_safety_jlink_command(rest),
         "read-bus-voltage-jlink" => read_bus_voltage_jlink_command(rest),
         "snapshot-jlink" => snapshot_jlink_command(rest),
+        "api-snapshot-jlink" => api_snapshot_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
         "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
         "jlink-script" => jlink_script_command(rest),
@@ -207,42 +209,59 @@ fn snapshot_jlink_command(args: &[String]) -> Result<String, String> {
         return Err("snapshot-jlink reads multiple symbols; use --elf instead of --address".to_string());
     }
 
+    Ok(format_snapshot_csv(
+        DEFAULT_NAME,
+        read_debug_snapshot(&options)?,
+    ))
+}
+
+fn api_snapshot_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = ApiSnapshotOptions::parse(args)?;
+    let snapshot = read_debug_snapshot(&options.symbols)?;
+    let entries = snapshot_api_entries(snapshot);
+    let catalog = ApiCatalog::new(&entries);
+    let mut response = [0; 96];
+    let response = catalog
+        .dispatch(&options.request, &mut response)
+        .map_err(format_api_dispatch_error)?;
+
+    Ok(format!("{response}\n"))
+}
+
+fn read_debug_snapshot(options: &SymbolReadOptions) -> Result<DebugSnapshot, String> {
     let benchmark = decode_packet(&read_symbol_bytes(
-        &options,
+        options,
         BENCHMARK_PACKET_SYMBOL,
         BENCHMARK_PACKET_LEN,
     )?)?;
     let status = decode_status_packet(&read_symbol_bytes(
-        &options,
+        options,
         STATUS_PACKET_SYMBOL,
         STATUS_PACKET_LEN,
     )?)?;
     let driver = decode_driver_report_packet(&read_symbol_bytes(
-        &options,
+        options,
         DRIVER_REPORT_PACKET_SYMBOL,
         DRIVER_REPORT_PACKET_LEN,
     )?)?;
     let output_safety = decode_output_safety_packet(&read_symbol_bytes(
-        &options,
+        options,
         OUTPUT_SAFETY_PACKET_SYMBOL,
         OUTPUT_SAFETY_PACKET_LEN,
     )?)?;
     let bus_voltage = decode_bus_voltage_packet(&read_symbol_bytes(
-        &options,
+        options,
         BUS_VOLTAGE_PACKET_SYMBOL,
         BUS_VOLTAGE_PACKET_LEN,
     )?)?;
 
-    Ok(format_snapshot_csv(
-        DEFAULT_NAME,
-        DebugSnapshot {
-            benchmark,
-            status,
-            driver,
-            output_safety,
-            bus_voltage,
-        },
-    ))
+    Ok(DebugSnapshot {
+        benchmark,
+        status,
+        driver,
+        output_safety,
+        bus_voltage,
+    })
 }
 
 fn read_symbol_bytes(
@@ -408,6 +427,74 @@ struct SymbolReadOptions {
     jlink: JlinkOptions,
     address: Option<u32>,
     elf_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ApiSnapshotOptions {
+    symbols: SymbolReadOptions,
+    request: String,
+}
+
+impl ApiSnapshotOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut symbols = SymbolReadOptions {
+            jlink: JlinkOptions {
+                address: DEFAULT_ADDRESS,
+                speed_khz: DEFAULT_SPEED_KHZ,
+                device: DEFAULT_DEVICE,
+            },
+            address: None,
+            elf_path: PathBuf::from(DEFAULT_ELF_PATH),
+        };
+        let mut request = None;
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--elf" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--elf requires a value".to_string())?;
+                    symbols.elf_path = PathBuf::from(path);
+                }
+                "--speed" => {
+                    index += 1;
+                    symbols.jlink.speed_khz = parse_u32_arg(args.get(index), "--speed")?;
+                }
+                "--device" => {
+                    index += 1;
+                    let device = args
+                        .get(index)
+                        .ok_or_else(|| "--device requires a value".to_string())?;
+                    if device != DEFAULT_DEVICE {
+                        return Err(format!(
+                            "unsupported device `{device}`; this helper currently supports `{DEFAULT_DEVICE}`"
+                        ));
+                    }
+                }
+                "--address" => {
+                    return Err(
+                        "api-snapshot-jlink reads multiple symbols; use --elf instead of --address"
+                            .to_string(),
+                    );
+                }
+                value => {
+                    if request.is_some() {
+                        return Err(format!("unexpected extra request argument `{value}`"));
+                    }
+                    request = Some(value.to_string());
+                }
+            }
+            index += 1;
+        }
+
+        Ok(Self {
+            symbols,
+            request: request
+                .ok_or_else(|| "api-snapshot-jlink requires a text API request".to_string())?,
+        })
+    }
 }
 
 impl SymbolReadOptions {
@@ -1010,6 +1097,191 @@ struct DebugSnapshot {
     bus_voltage: BusVoltagePacket,
 }
 
+const SNAPSHOT_API_ENTRY_COUNT: usize = 37;
+
+fn snapshot_api_entries(snapshot: DebugSnapshot) -> [ApiEntry<'static>; SNAPSHOT_API_ENTRY_COUNT] {
+    let report = snapshot.benchmark.report;
+    let status = snapshot.output_safety.status;
+    let bus_sample = BusVoltageCalibration::MOTOR_HALL.convert(snapshot.bus_voltage.raw);
+    let bus_allows_output = OutputGate::MOTOR_HALL.allows_output_raw(snapshot.bus_voltage.raw);
+    let combined_max_cycles = FAST_LOOPS_PER_MAIN_LOOP * report.max_fast_loop_cycles() as u64
+        + report.max_main_loop_cycles() as u64;
+    let combined_mean_milli_cycles = FAST_LOOPS_PER_MAIN_LOOP
+        * report.mean_fast_loop_cycles_milli_cycles()
+        + report.mean_main_loop_cycles_milli_cycles();
+    let combined_mean_remaining_milli_cycles =
+        CYCLES_PER_100_US as i64 * 1_000 - combined_mean_milli_cycles as i64;
+
+    [
+        ApiEntry::new(
+            "max_fast_loop_cycles",
+            ApiValue::U32(report.max_fast_loop_cycles()),
+        ),
+        ApiEntry::new(
+            "max_fast_loop_period",
+            ApiValue::U32(report.max_fast_loop_period_cycles()),
+        ),
+        ApiEntry::new(
+            "fast_max_load_percent",
+            ApiValue::F32(percent_f32(
+                report.max_fast_loop_cycles() as u64,
+                report.max_fast_loop_period_cycles() as u64,
+            )),
+        ),
+        ApiEntry::new(
+            "fast_max_remaining_cycles",
+            ApiValue::I32(
+                report.max_fast_loop_period_cycles() as i32 - report.max_fast_loop_cycles() as i32,
+            ),
+        ),
+        ApiEntry::new(
+            "max_main_loop_cycles",
+            ApiValue::U32(report.max_main_loop_cycles()),
+        ),
+        ApiEntry::new(
+            "max_main_loop_period",
+            ApiValue::U32(report.max_main_loop_period_cycles()),
+        ),
+        ApiEntry::new(
+            "main_max_load_percent",
+            ApiValue::F32(percent_f32(
+                report.max_main_loop_cycles() as u64,
+                report.max_main_loop_period_cycles() as u64,
+            )),
+        ),
+        ApiEntry::new(
+            "main_max_remaining_cycles",
+            ApiValue::I32(
+                report.max_main_loop_period_cycles() as i32 - report.max_main_loop_cycles() as i32,
+            ),
+        ),
+        ApiEntry::new(
+            "combined_max_cycles",
+            ApiValue::U32(combined_max_cycles as u32),
+        ),
+        ApiEntry::new(
+            "combined_max_load_percent",
+            ApiValue::F32(percent_f32(combined_max_cycles, CYCLES_PER_100_US)),
+        ),
+        ApiEntry::new(
+            "combined_max_remaining_cycles",
+            ApiValue::I32(CYCLES_PER_100_US as i32 - combined_max_cycles as i32),
+        ),
+        ApiEntry::new(
+            "mean_fast_loop_cycles",
+            ApiValue::F32(milli_cycles_to_f32(
+                report.mean_fast_loop_cycles_milli_cycles(),
+            )),
+        ),
+        ApiEntry::new(
+            "mean_fast_loop_period",
+            ApiValue::F32(milli_cycles_to_f32(
+                report.mean_fast_loop_period_milli_cycles(),
+            )),
+        ),
+        ApiEntry::new(
+            "mean_main_loop_cycles",
+            ApiValue::F32(milli_cycles_to_f32(
+                report.mean_main_loop_cycles_milli_cycles(),
+            )),
+        ),
+        ApiEntry::new(
+            "mean_main_loop_period",
+            ApiValue::F32(milli_cycles_to_f32(
+                report.mean_main_loop_period_milli_cycles(),
+            )),
+        ),
+        ApiEntry::new(
+            "combined_mean_cycles",
+            ApiValue::F32(milli_cycles_to_f32(combined_mean_milli_cycles)),
+        ),
+        ApiEntry::new(
+            "combined_mean_load_percent",
+            ApiValue::F32(milli_percent_f32(
+                combined_mean_milli_cycles,
+                CYCLES_PER_100_US,
+            )),
+        ),
+        ApiEntry::new(
+            "combined_mean_remaining_cycles",
+            ApiValue::F32(signed_milli_cycles_to_f32(
+                combined_mean_remaining_milli_cycles,
+            )),
+        ),
+        ApiEntry::new("fault", ApiValue::Str(format_fault(snapshot.status.state.fault))),
+        ApiEntry::new("torque_nm", ApiValue::F32(snapshot.status.state.torque_nm)),
+        ApiEntry::new(
+            "velocity_rad_s",
+            ApiValue::F32(snapshot.status.state.velocity_rad_s),
+        ),
+        ApiEntry::new("position_rad", ApiValue::F32(snapshot.status.state.position_rad)),
+        ApiEntry::new("output_allowed", ApiValue::Bool(status.output_allowed)),
+        ApiEntry::new("command_blocked", ApiValue::Bool(status.command_blocked)),
+        ApiEntry::new("bus_blocked", ApiValue::Bool(status.bus_blocked)),
+        ApiEntry::new(
+            "driver_not_enabled",
+            ApiValue::Bool(status.driver_not_enabled),
+        ),
+        ApiEntry::new(
+            "driver_fault_latched",
+            ApiValue::Bool(status.driver_fault_latched),
+        ),
+        ApiEntry::new(
+            "controller_faulted",
+            ApiValue::Bool(status.controller_faulted),
+        ),
+        ApiEntry::new("host_timed_out", ApiValue::Bool(status.host_timed_out)),
+        ApiEntry::new("bus_voltage_raw", ApiValue::U16(snapshot.bus_voltage.raw)),
+        ApiEntry::new("bus_voltage_volts", ApiValue::F32(bus_sample.volts)),
+        ApiEntry::new("bus_allows_output", ApiValue::Bool(bus_allows_output)),
+        ApiEntry::new("driver_configured", ApiValue::Bool(snapshot.driver.configured)),
+        ApiEntry::new(
+            "verify_error_mask",
+            ApiValue::U16(snapshot.driver.verify_error_mask),
+        ),
+        ApiEntry::new(
+            "transfer_error_mask",
+            ApiValue::U16(snapshot.driver.transfer_error_mask),
+        ),
+        ApiEntry::new("status_before", ApiValue::U32(snapshot.driver.status_before)),
+        ApiEntry::new("status_after", ApiValue::U32(snapshot.driver.status_after)),
+    ]
+}
+
+fn format_api_dispatch_error(error: ApiDispatchError) -> String {
+    match error {
+        ApiDispatchError::Parse(error) => format!("parse failed: {error:?}"),
+        ApiDispatchError::UnknownName => "unknown API variable".to_string(),
+        ApiDispatchError::ReadOnly => "API variable is read-only".to_string(),
+        ApiDispatchError::NameIndexOutOfRange => "API variable index out of range".to_string(),
+        ApiDispatchError::ResponseTooLong => "API response buffer too small".to_string(),
+    }
+}
+
+fn milli_cycles_to_f32(value: u64) -> f32 {
+    value as f32 / 1_000.0
+}
+
+fn signed_milli_cycles_to_f32(value: i64) -> f32 {
+    value as f32 / 1_000.0
+}
+
+fn percent_f32(numerator_cycles: u64, denominator_cycles: u64) -> f32 {
+    if denominator_cycles == 0 {
+        return f32::NAN;
+    }
+
+    numerator_cycles as f32 * 100.0 / denominator_cycles as f32
+}
+
+fn milli_percent_f32(numerator_milli_cycles: u64, denominator_cycles: u64) -> f32 {
+    if denominator_cycles == 0 {
+        return f32::NAN;
+    }
+
+    numerator_milli_cycles as f32 * 100.0 / (denominator_cycles as f32 * 1_000.0)
+}
+
 fn format_snapshot_csv(name: &str, snapshot: DebugSnapshot) -> String {
     let report = snapshot.benchmark.report;
     let status = snapshot.output_safety.status;
@@ -1311,6 +1583,7 @@ fn usage() -> String {
   obot-bench-debug read-output-safety-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <output-safety-address>] [--speed 4000]
   obot-bench-debug read-bus-voltage-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <bus-voltage-address>] [--speed 4000]
   obot-bench-debug snapshot-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--speed 4000]
+  obot-bench-debug api-snapshot-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--speed 4000] <api-request>
   obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
 ",
@@ -1604,6 +1877,85 @@ mod tests {
         assert!(output.contains("combined_mean_load_percent"));
         assert!(output.contains(", combined_max_remaining_cycles,"));
         assert!(output.contains("rust, 9, 3, 4, 5, 6, 710, 3416, 20.78, 2706, 6445, 17045, 37.81, 10600, 9995, 58.79, 7005, 708.965, 3555.49, 7100.315, 41.77, 9899.685, torque_limit, false, true, true, true, false, true, true, 1963, 8.000, true, false, 0x0012, 0x0040, 0xAABBCCDD, 0x11223344, 1.25, 0, -0.5\n"));
+    }
+
+    #[test]
+    fn exposes_snapshot_values_through_text_api_catalog() {
+        let entries = snapshot_api_entries(DebugSnapshot {
+            benchmark: sample_packet(),
+            status: StatusPacket {
+                sequence: 3,
+                state: obot_core::MotorState {
+                    torque_nm: 1.25,
+                    velocity_rad_s: 0.0,
+                    position_rad: -0.5,
+                    fault: Some(obot_core::Fault::TorqueLimit),
+                },
+            },
+            driver: DriverReportPacket {
+                sequence: 4,
+                configured: false,
+                verify_error_mask: 0x0012,
+                transfer_error_mask: 0x0040,
+                status_before: 0xAABB_CCDD,
+                status_after: 0x1122_3344,
+            },
+            output_safety: OutputSafetyPacket {
+                sequence: 5,
+                status: obot_core::output::OutputSafetyStatus {
+                    output_allowed: false,
+                    command_blocked: true,
+                    bus_blocked: true,
+                    driver_not_enabled: true,
+                    driver_fault_latched: false,
+                    controller_faulted: true,
+                    host_timed_out: true,
+                },
+            },
+            bus_voltage: BusVoltagePacket {
+                sequence: 6,
+                raw: OutputGate::MOTOR_HALL.min_raw,
+            },
+        });
+        let catalog = ApiCatalog::new(&entries);
+        let mut response = [0; 96];
+
+        assert_eq!(
+            catalog.dispatch("api_name=0", &mut response),
+            Ok("max_fast_loop_cycles")
+        );
+        assert_eq!(
+            catalog.dispatch("max_fast_loop_cycles", &mut response),
+            Ok("710")
+        );
+        assert_eq!(
+            catalog.dispatch("fault", &mut response),
+            Ok("torque_limit")
+        );
+        assert_eq!(
+            catalog.dispatch("bus_allows_output", &mut response),
+            Ok("true")
+        );
+        assert_eq!(
+            catalog.dispatch("verify_error_mask", &mut response),
+            Ok("18")
+        );
+    }
+
+    #[test]
+    fn parses_api_snapshot_options() {
+        let options = ApiSnapshotOptions::parse(&[
+            "--elf".to_string(),
+            "target/custom.elf".to_string(),
+            "--speed".to_string(),
+            "1000".to_string(),
+            "mean_fast_loop_cycles".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.symbols.elf_path, PathBuf::from("target/custom.elf"));
+        assert_eq!(options.symbols.jlink.speed_khz, 1_000);
+        assert_eq!(options.request, "mean_fast_loop_cycles");
     }
 
     #[test]

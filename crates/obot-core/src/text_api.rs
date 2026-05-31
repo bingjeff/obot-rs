@@ -1,3 +1,5 @@
+use core::fmt::Write;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApiRequest<'a> {
     Get { name: &'a str },
@@ -11,6 +13,108 @@ pub enum ApiParseError {
     MissingName,
     MissingValue,
     InvalidIndex,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ApiValue<'a> {
+    Bool(bool),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    I32(i32),
+    F32(f32),
+    Str(&'a str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ApiEntry<'a> {
+    pub name: &'a str,
+    pub value: ApiValue<'a>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApiDispatchError {
+    Parse(ApiParseError),
+    UnknownName,
+    ReadOnly,
+    NameIndexOutOfRange,
+    ResponseTooLong,
+}
+
+pub struct ApiCatalog<'a> {
+    entries: &'a [ApiEntry<'a>],
+}
+
+impl<'a> ApiCatalog<'a> {
+    pub const fn new(entries: &'a [ApiEntry<'a>]) -> Self {
+        Self { entries }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn dispatch<'out>(
+        &self,
+        input: &str,
+        output: &'out mut [u8],
+    ) -> Result<&'out str, ApiDispatchError> {
+        match parse_request(input).map_err(ApiDispatchError::Parse)? {
+            ApiRequest::Get { name } => self.read(name, output),
+            ApiRequest::Set { name, .. } => {
+                if self.find(name).is_some() {
+                    Err(ApiDispatchError::ReadOnly)
+                } else {
+                    Err(ApiDispatchError::UnknownName)
+                }
+            }
+            ApiRequest::NameAt { index } => self.name_at(index, output),
+        }
+    }
+
+    pub fn read<'out>(
+        &self,
+        name: &str,
+        output: &'out mut [u8],
+    ) -> Result<&'out str, ApiDispatchError> {
+        let entry = self.find(name).ok_or(ApiDispatchError::UnknownName)?;
+        let mut writer = ResponseWriter::new(output);
+        write_value(&mut writer, entry.value).map_err(|_| ApiDispatchError::ResponseTooLong)?;
+        writer.finish()
+    }
+
+    pub fn name_at<'out>(
+        &self,
+        index: u16,
+        output: &'out mut [u8],
+    ) -> Result<&'out str, ApiDispatchError> {
+        let entry = self
+            .entries
+            .get(index as usize)
+            .ok_or(ApiDispatchError::NameIndexOutOfRange)?;
+        let mut writer = ResponseWriter::new(output);
+        writer
+            .write_str(entry.name)
+            .map_err(|_| ApiDispatchError::ResponseTooLong)?;
+        writer.finish()
+    }
+
+    fn find(&self, name: &str) -> Option<ApiEntry<'a>> {
+        self.entries
+            .iter()
+            .copied()
+            .find(|entry| entry.name == name)
+    }
+}
+
+impl<'a> ApiEntry<'a> {
+    pub const fn new(name: &'a str, value: ApiValue<'a>) -> Self {
+        Self { name, value }
+    }
 }
 
 pub fn parse_request(input: &str) -> Result<ApiRequest<'_>, ApiParseError> {
@@ -73,6 +177,49 @@ fn parse_u16(input: &str) -> Option<u16> {
     Some(value)
 }
 
+struct ResponseWriter<'a> {
+    bytes: &'a mut [u8],
+    len: usize,
+}
+
+impl<'a> ResponseWriter<'a> {
+    fn new(bytes: &'a mut [u8]) -> Self {
+        Self { bytes, len: 0 }
+    }
+
+    fn finish(self) -> Result<&'a str, ApiDispatchError> {
+        core::str::from_utf8(&self.bytes[..self.len]).map_err(|_| ApiDispatchError::ResponseTooLong)
+    }
+}
+
+impl core::fmt::Write for ResponseWriter<'_> {
+    fn write_str(&mut self, value: &str) -> core::fmt::Result {
+        let remaining = self.bytes.len().saturating_sub(self.len);
+        if value.len() > remaining {
+            return Err(core::fmt::Error);
+        }
+
+        let end = self.len + value.len();
+        self.bytes[self.len..end].copy_from_slice(value.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+fn write_value(writer: &mut ResponseWriter<'_>, value: ApiValue<'_>) -> core::fmt::Result {
+    use core::fmt::Write;
+
+    match value {
+        ApiValue::Bool(value) => write!(writer, "{}", value),
+        ApiValue::U8(value) => write!(writer, "{}", value),
+        ApiValue::U16(value) => write!(writer, "{}", value),
+        ApiValue::U32(value) => write!(writer, "{}", value),
+        ApiValue::I32(value) => write!(writer, "{}", value),
+        ApiValue::F32(value) => write!(writer, "{}", value),
+        ApiValue::Str(value) => writer.write_str(value),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +264,77 @@ mod tests {
         assert_eq!(
             parse_request("api_name=70000"),
             Err(ApiParseError::InvalidIndex)
+        );
+    }
+
+    #[test]
+    fn dispatches_named_reads_from_fixed_catalog() {
+        let entries = [
+            ApiEntry::new("ready", ApiValue::Bool(true)),
+            ApiEntry::new("bus_voltage_raw", ApiValue::U16(1963)),
+            ApiEntry::new("mean_fast_loop_cycles", ApiValue::F32(435.708)),
+            ApiEntry::new("fault", ApiValue::Str("none")),
+        ];
+        let catalog = ApiCatalog::new(&entries);
+        let mut output = [0; 32];
+
+        assert_eq!(catalog.dispatch("ready", &mut output), Ok("true"));
+        assert_eq!(catalog.dispatch("bus_voltage_raw", &mut output), Ok("1963"));
+        assert_eq!(
+            catalog.dispatch("mean_fast_loop_cycles", &mut output),
+            Ok("435.708")
+        );
+        assert_eq!(catalog.dispatch("fault", &mut output), Ok("none"));
+    }
+
+    #[test]
+    fn dispatches_api_name_lookup_from_fixed_catalog_order() {
+        let entries = [
+            ApiEntry::new("max_fast_loop_cycles", ApiValue::U32(836)),
+            ApiEntry::new("bus_voltage_raw", ApiValue::U16(2)),
+        ];
+        let catalog = ApiCatalog::new(&entries);
+        let mut output = [0; 32];
+
+        assert_eq!(
+            catalog.dispatch("api_name=0", &mut output),
+            Ok("max_fast_loop_cycles")
+        );
+        assert_eq!(
+            catalog.dispatch("api_name=1", &mut output),
+            Ok("bus_voltage_raw")
+        );
+        assert_eq!(
+            catalog.dispatch("api_name=2", &mut output),
+            Err(ApiDispatchError::NameIndexOutOfRange)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_and_read_only_dispatches() {
+        let entries = [ApiEntry::new("kp", ApiValue::F32(100.0))];
+        let catalog = ApiCatalog::new(&entries);
+        let mut output = [0; 32];
+
+        assert_eq!(
+            catalog.dispatch("missing", &mut output),
+            Err(ApiDispatchError::UnknownName)
+        );
+        assert_eq!(
+            catalog.dispatch("kp=99", &mut output),
+            Err(ApiDispatchError::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn rejects_responses_that_do_not_fit_output_buffer() {
+        let entries = [ApiEntry::new("long", ApiValue::Str("abcdef"))];
+        let catalog = ApiCatalog::new(&entries);
+        let mut output = [0; 3];
+
+        assert_eq!(
+            catalog.dispatch("long", &mut output),
+            Err(ApiDispatchError::ResponseTooLong)
         );
     }
 }
