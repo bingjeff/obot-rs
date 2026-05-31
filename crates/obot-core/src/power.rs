@@ -29,12 +29,16 @@ impl BusVoltageCalibration {
 pub struct OutputGate {
     pub min_vbus_v: f32,
     pub max_vbus_v: f32,
+    pub min_raw: u16,
+    pub max_raw: u16,
 }
 
 impl OutputGate {
     pub const MOTOR_HALL: Self = Self {
         min_vbus_v: 10.0,
         max_vbus_v: 60.0,
+        min_raw: 2_454,
+        max_raw: 14_721,
     };
 
     #[inline(always)]
@@ -43,8 +47,22 @@ impl OutputGate {
     }
 
     #[inline(always)]
+    pub fn allows_output_raw(self, raw: u16) -> bool {
+        raw >= self.min_raw && raw <= self.max_raw
+    }
+
+    #[inline(always)]
     pub fn gate_voltages(self, command: FocVoltages, bus: BusVoltageSample) -> FocVoltages {
         if self.allows_output(bus) {
+            command
+        } else {
+            FocVoltages::default()
+        }
+    }
+
+    #[inline(always)]
+    pub fn gate_voltages_raw(self, command: FocVoltages, raw: u16) -> FocVoltages {
+        if self.allows_output_raw(raw) {
             command
         } else {
             FocVoltages::default()
@@ -109,6 +127,11 @@ mod tests {
         );
         assert_eq!(
             gate.gate_voltages(command, BusVoltageSample { raw: 0, volts: 0.0 }),
+            FocVoltages::default()
+        );
+        assert_eq!(gate.gate_voltages_raw(command, 2_454), command);
+        assert_eq!(
+            gate.gate_voltages_raw(command, 2_453),
             FocVoltages::default()
         );
     }

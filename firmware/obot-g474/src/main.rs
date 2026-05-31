@@ -22,7 +22,7 @@ use obot_core::{
     current::CurrentCalibration,
     foc::{FocCommand, FocController, FocDesired, FocMeasured, FocParam},
     hall::HallElectricalAngle,
-    power::{BusVoltageCalibration, OutputGate},
+    power::OutputGate,
 };
 #[cfg(target_os = "none")]
 use obot_g474::adc::CurrentAdc;
@@ -85,7 +85,6 @@ fn firmware_main() -> ! {
         },
     };
     let current_calibration = CurrentCalibration::MOTOR_HALL;
-    let bus_voltage_calibration = BusVoltageCalibration::MOTOR_HALL;
     let output_gate = OutputGate::MOTOR_HALL;
     let hall_angle = HallElectricalAngle::MOTOR_HALL;
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
@@ -101,8 +100,7 @@ fn firmware_main() -> ! {
                 pwm.write_zero_voltage();
                 let hall_sample = hall.read_sample();
                 let hall_sincos = hall_angle.sincos_hall_count(hall_sample.hall_count);
-                let bus_voltage =
-                    bus_voltage_calibration.convert(current_adc.read_bus_voltage_raw());
+                let bus_voltage_raw = current_adc.read_bus_voltage_raw();
                 let currents = current_calibration.convert(current_adc.read_samples());
                 let foc_command = FocCommand {
                     desired: FocDesired::default(),
@@ -113,9 +111,10 @@ fn firmware_main() -> ! {
                 };
                 let foc_status =
                     foc.step_with_sincos(&foc_command, hall_sincos.sin, hall_sincos.cos);
-                let gated_command = output_gate.gate_voltages(foc_status.command, bus_voltage);
+                let gated_command =
+                    output_gate.gate_voltages_raw(foc_status.command, bus_voltage_raw);
                 let pwm_compares = pwm.compares_from_voltages(gated_command);
-                core::hint::black_box((foc_status, bus_voltage, pwm_compares));
+                core::hint::black_box((foc_status, bus_voltage_raw, pwm_compares));
                 core::hint::black_box(controller.state());
             });
         }
