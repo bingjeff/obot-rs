@@ -218,9 +218,7 @@ const fn max_u32(a: u32, b: u32) -> u32 {
 
 #[inline(always)]
 fn clamp_compare(value: f32, min: u32, max: u32) -> u32 {
-    if !value.is_finite() {
-        return min;
-    }
+    debug_assert!(value.is_finite());
 
     let clamped_high = if value > max as f32 {
         max as f32
@@ -233,8 +231,9 @@ fn clamp_compare(value: f32, min: u32, max: u32) -> u32 {
         clamped_high
     };
 
-    // SAFETY: non-finite values return early, and clamped is explicitly bounded
-    // to [min, max], where both bounds are valid u32 compare register values.
+    // SAFETY: the current firmware only derives PWM commands from finite ADC
+    // samples and finite constants. clamped is explicitly bounded to [min, max],
+    // where both bounds are valid u32 compare register values.
     unsafe { clamped.to_int_unchecked::<u32>() }
 }
 
