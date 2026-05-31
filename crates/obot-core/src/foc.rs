@@ -68,6 +68,18 @@ impl PiController {
         fsat(self.param.kp * error + self.ki_sum, self.param.command_max)
     }
 
+    #[inline(always)]
+    pub fn step_motor_hall_current(&mut self, desired: f32, measured: f32) -> f32 {
+        const KP: f32 = FocParam::MOTOR_HALL.pi_d.kp;
+        const KI: f32 = FocParam::MOTOR_HALL.pi_d.ki;
+        const KI_LIMIT: f32 = FocParam::MOTOR_HALL.pi_d.ki_limit;
+        const COMMAND_MAX: f32 = FocParam::MOTOR_HALL.pi_d.command_max;
+
+        let error = desired - measured;
+        self.ki_sum = fsat(self.ki_sum + KI * error, KI_LIMIT);
+        fsat(KP * error + self.ki_sum, COMMAND_MAX)
+    }
+
     pub const fn ki_sum(self) -> f32 {
         self.ki_sum
     }
@@ -238,8 +250,8 @@ impl FocController {
         cos_t: f32,
     ) -> FocVoltages {
         let (_, i_d_filtered, i_q_filtered) = self.measure_currents(currents, sin_t, cos_t);
-        let v_d = self.pi_d.step(desired.i_d, i_d_filtered);
-        let v_q = self.pi_q.step(desired.i_q, i_q_filtered) + desired.v_q;
+        let v_d = self.pi_d.step_motor_hall_current(desired.i_d, i_d_filtered);
+        let v_q = self.pi_q.step_motor_hall_current(desired.i_q, i_q_filtered) + desired.v_q;
         voltage_command_from_dq(v_d, v_q, sin_t, cos_t)
     }
 
@@ -343,6 +355,23 @@ mod tests {
         assert_close(pi.step(-10.0, 0.0), -6.0);
         assert_close(pi.ki_sum(), -5.0);
     }
+
+    #[test]
+    fn motor_hall_pi_fast_path_matches_generic_motor_hall_step() {
+        let mut generic = PiController::new(FocParam::MOTOR_HALL.pi_d);
+        let mut fast_path = PiController::new(FocParam::MOTOR_HALL.pi_d);
+
+        assert_close(
+            fast_path.step_motor_hall_current(0.25, -0.5),
+            generic.step(0.25, -0.5),
+        );
+        assert_close(
+            fast_path.step_motor_hall_current(-0.75, 0.1),
+            generic.step(-0.75, 0.1),
+        );
+        assert_close(fast_path.ki_sum(), generic.ki_sum());
+    }
+
     #[test]
     fn clarke_park_at_zero_angle_maps_balanced_a_axis_current_to_d_axis() {
         let mut foc = FocController::new(FocParam::MOTOR_HALL, DT_50_KHZ);
