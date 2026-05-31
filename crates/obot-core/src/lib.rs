@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod timing;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MotorCommand {
     pub torque_nm: f32,
