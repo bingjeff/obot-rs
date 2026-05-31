@@ -221,7 +221,7 @@ impl FocController {
     }
 
     #[inline(always)]
-    pub fn step_with_sincos(&mut self, command: &FocCommand, sin_t: f32, cos_t: f32) -> &FocStatus {
+    pub fn step_with_sincos(&mut self, command: &FocCommand, sin_t: f32, cos_t: f32) -> FocStatus {
         let currents = command.measured.currents;
         let i_alpha = TWO_THIRDS * currents.phase_a
             + NEG_ONE_THIRD * currents.phase_b
@@ -243,7 +243,7 @@ impl FocController {
         let v_b = NEG_ONE_THIRD * v_alpha + ONE_OVER_SQRT3 * v_beta;
         let v_c = NEG_ONE_THIRD * v_alpha - ONE_OVER_SQRT3 * v_beta;
 
-        self.status = FocStatus {
+        let status = FocStatus {
             desired: command.desired,
             measured: DqCurrents {
                 i_d,
@@ -258,7 +258,8 @@ impl FocController {
                 v_q,
             },
         };
-        &self.status
+        self.status = status;
+        status
     }
 }
 
@@ -312,7 +313,7 @@ mod tests {
         let mut foc = FocController::new(FocParam::MOTOR_HALL, DT_50_KHZ);
         foc.voltage_mode();
 
-        let status = *foc.step_with_sincos(
+        let status = foc.step_with_sincos(
             &FocCommand {
                 measured: FocMeasured {
                     currents: PhaseCurrents {
@@ -338,7 +339,7 @@ mod tests {
         let mut foc = FocController::new(FocParam::MOTOR_HALL, DT_50_KHZ);
         foc.current_mode();
 
-        let status = *foc.step_with_sincos(
+        let status = foc.step_with_sincos(
             &FocCommand {
                 measured: FocMeasured {
                     currents: PhaseCurrents {
