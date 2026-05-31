@@ -153,6 +153,12 @@ impl HallMotionEstimator {
             self.initialized = true;
             0
         };
+        if diff == 0
+            && self.estimate.raw_count == sample.count
+            && self.estimate.velocity_filtered_rad_s == 0.0
+        {
+            return self.estimate;
+        }
         self.last_count = sample.count;
 
         let position_rad = sample.count as f32 * self.position_radians_per_count;
@@ -306,6 +312,21 @@ mod tests {
         assert_close(second.position_rad, -4.0 * core::f32::consts::PI / 42.0);
         assert_close(second.velocity_rad_s, expected_velocity);
         assert_close(second.velocity_filtered_rad_s, expected_velocity * 0.001);
+    }
+
+    #[test]
+    fn hall_motion_estimator_keeps_stationary_zero_velocity_estimate() {
+        let mut estimator = HallMotionEstimator::MOTOR_HALL;
+        let first = estimator.update(super::HallSample {
+            count: 3,
+            hall_count: 3,
+        });
+        let second = estimator.update(super::HallSample {
+            count: 3,
+            hall_count: 3,
+        });
+
+        assert_eq!(second, first);
     }
 
     fn assert_close(actual: f32, expected: f32) {
