@@ -18,6 +18,8 @@ use obot_core::{
     timing::{LoopScheduler, LoopTiming},
 };
 #[cfg(target_os = "none")]
+use obot_g474::adc::CurrentAdc;
+#[cfg(target_os = "none")]
 use obot_g474::cycle_counter::{CycleCounter, DwtCycleCounter};
 #[cfg(target_os = "none")]
 use obot_g474::hall::HallInputs;
@@ -66,6 +68,12 @@ fn firmware_main() -> ! {
     cycle_counter.enable();
     let pwm = SafeZeroPwm::init_motor_hall();
     let mut hall = HallInputs::init_motor_hall();
+    let current_adc = match CurrentAdc::init_motor_hall() {
+        Ok(adc) => adc,
+        Err(_) => loop {
+            core::hint::spin_loop();
+        },
+    };
 
     let _ = controller.state();
     core::hint::black_box(pwm.config());
@@ -76,6 +84,7 @@ fn firmware_main() -> ! {
             run_measured_loop(&mut fast_benchmark, &cycle_counter, || {
                 pwm.write_zero_voltage();
                 core::hint::black_box(hall.read_count());
+                core::hint::black_box(current_adc.read_samples());
                 core::hint::black_box(controller.state());
             });
         }
