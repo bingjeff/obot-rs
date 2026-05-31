@@ -7,7 +7,7 @@ use obot_core::{
 
 pub const COMMAND_PACKET_LEN: usize = 14;
 pub const STATUS_PACKET_LEN: usize = 14;
-pub const BENCHMARK_PACKET_LEN: usize = 65;
+pub const BENCHMARK_PACKET_LEN: usize = 81;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodeError {
@@ -128,9 +128,10 @@ fn encode_stats_snapshot(
     snapshot: CycleStatsSnapshot,
 ) -> usize {
     out[offset..offset + 4].copy_from_slice(&snapshot.samples.to_le_bytes());
-    out[offset + 4..offset + 8].copy_from_slice(&snapshot.max_cycles.to_le_bytes());
-    out[offset + 8..offset + 16].copy_from_slice(&snapshot.mean_milli_cycles.to_le_bytes());
-    offset + 16
+    out[offset + 4..offset + 8].copy_from_slice(&snapshot.last_cycles.to_le_bytes());
+    out[offset + 8..offset + 12].copy_from_slice(&snapshot.max_cycles.to_le_bytes());
+    out[offset + 12..offset + 20].copy_from_slice(&snapshot.mean_milli_cycles.to_le_bytes());
+    offset + 20
 }
 
 fn decode_loop_snapshot(
@@ -147,16 +148,18 @@ fn decode_stats_snapshot(
     offset: usize,
 ) -> (CycleStatsSnapshot, usize) {
     let samples = u32::from_le_bytes(input[offset..offset + 4].try_into().unwrap());
-    let max_cycles = u32::from_le_bytes(input[offset + 4..offset + 8].try_into().unwrap());
-    let mean_milli_cycles = u64::from_le_bytes(input[offset + 8..offset + 16].try_into().unwrap());
+    let last_cycles = u32::from_le_bytes(input[offset + 4..offset + 8].try_into().unwrap());
+    let max_cycles = u32::from_le_bytes(input[offset + 8..offset + 12].try_into().unwrap());
+    let mean_milli_cycles = u64::from_le_bytes(input[offset + 12..offset + 20].try_into().unwrap());
 
     (
         CycleStatsSnapshot {
             samples,
+            last_cycles,
             max_cycles,
             mean_milli_cycles,
         },
-        offset + 16,
+        offset + 20,
     )
 }
 
@@ -256,11 +259,13 @@ mod tests {
                 fast: LoopBenchmarkSnapshot {
                     period: CycleStatsSnapshot {
                         samples: 10,
+                        last_cycles: 3_398,
                         max_cycles: 3_416,
                         mean_milli_cycles: 3_397_560,
                     },
                     execution: CycleStatsSnapshot {
                         samples: 11,
+                        last_cycles: 709,
                         max_cycles: 710,
                         mean_milli_cycles: 708_965,
                     },
@@ -268,11 +273,13 @@ mod tests {
                 main: LoopBenchmarkSnapshot {
                     period: CycleStatsSnapshot {
                         samples: 12,
+                        last_cycles: 17_000,
                         max_cycles: 17_045,
                         mean_milli_cycles: 16_999_800,
                     },
                     execution: CycleStatsSnapshot {
                         samples: 13,
+                        last_cycles: 3_555,
                         max_cycles: 6_445,
                         mean_milli_cycles: 3_555_490,
                     },

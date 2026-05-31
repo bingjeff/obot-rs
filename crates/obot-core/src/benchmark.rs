@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CycleStats {
     samples: u32,
+    last_cycles: u32,
     max_cycles: u32,
     total_cycles: u64,
 }
@@ -9,6 +10,7 @@ impl CycleStats {
     pub const fn new() -> Self {
         Self {
             samples: 0,
+            last_cycles: 0,
             max_cycles: 0,
             total_cycles: 0,
         }
@@ -16,12 +18,17 @@ impl CycleStats {
 
     pub fn record(&mut self, cycles: u32) {
         self.samples = self.samples.saturating_add(1);
+        self.last_cycles = cycles;
         self.max_cycles = self.max_cycles.max(cycles);
         self.total_cycles = self.total_cycles.saturating_add(cycles as u64);
     }
 
     pub const fn samples(self) -> u32 {
         self.samples
+    }
+
+    pub const fn last_cycles(self) -> u32 {
+        self.last_cycles
     }
 
     pub const fn max_cycles(self) -> u32 {
@@ -43,6 +50,7 @@ impl CycleStats {
     pub const fn snapshot(self) -> CycleStatsSnapshot {
         CycleStatsSnapshot {
             samples: self.samples,
+            last_cycles: self.last_cycles,
             max_cycles: self.max_cycles,
             mean_milli_cycles: self.mean_milli_cycles(),
         }
@@ -52,6 +60,7 @@ impl CycleStats {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CycleStatsSnapshot {
     pub samples: u32,
+    pub last_cycles: u32,
     pub max_cycles: u32,
     pub mean_milli_cycles: u64,
 }
@@ -141,12 +150,20 @@ impl BenchmarkReport {
         self.fast.period.mean_milli_cycles
     }
 
+    pub const fn t_period_fastloop(self) -> u32 {
+        self.fast.period.last_cycles
+    }
+
     pub const fn max_fast_loop_period_cycles(self) -> u32 {
         self.fast.period.max_cycles
     }
 
     pub const fn mean_fast_loop_cycles_milli_cycles(self) -> u64 {
         self.fast.execution.mean_milli_cycles
+    }
+
+    pub const fn t_exec_fastloop(self) -> u32 {
+        self.fast.execution.last_cycles
     }
 
     pub const fn max_fast_loop_cycles(self) -> u32 {
@@ -157,12 +174,20 @@ impl BenchmarkReport {
         self.main.period.mean_milli_cycles
     }
 
+    pub const fn t_period_mainloop(self) -> u32 {
+        self.main.period.last_cycles
+    }
+
     pub const fn max_main_loop_period_cycles(self) -> u32 {
         self.main.period.max_cycles
     }
 
     pub const fn mean_main_loop_cycles_milli_cycles(self) -> u64 {
         self.main.execution.mean_milli_cycles
+    }
+
+    pub const fn t_exec_mainloop(self) -> u32 {
+        self.main.execution.last_cycles
     }
 
     pub const fn max_main_loop_cycles(self) -> u32 {
@@ -184,6 +209,7 @@ mod tests {
         stats.record(10);
 
         assert_eq!(stats.samples(), 2);
+        assert_eq!(stats.last_cycles(), 10);
         assert_eq!(stats.max_cycles(), 10);
         assert_eq!(stats.total_cycles(), 17);
         assert_eq!(stats.mean_milli_cycles(), 8_500);
@@ -191,6 +217,7 @@ mod tests {
             stats.snapshot(),
             CycleStatsSnapshot {
                 samples: 2,
+                last_cycles: 10,
                 max_cycles: 10,
                 mean_milli_cycles: 8_500,
             }
@@ -244,12 +271,16 @@ mod tests {
 
         let report = BenchmarkReport::from_loops(fast, main);
 
+        assert_eq!(report.t_exec_fastloop(), 710);
         assert_eq!(report.max_fast_loop_cycles(), 710);
         assert_eq!(report.mean_fast_loop_cycles_milli_cycles(), 710_000);
+        assert_eq!(report.t_period_fastloop(), 3_400);
         assert_eq!(report.max_fast_loop_period_cycles(), 3_400);
         assert_eq!(report.mean_fast_loop_period_milli_cycles(), 3_400_000);
+        assert_eq!(report.t_exec_mainloop(), 3_555);
         assert_eq!(report.max_main_loop_cycles(), 3_555);
         assert_eq!(report.mean_main_loop_cycles_milli_cycles(), 3_555_000);
+        assert_eq!(report.t_period_mainloop(), 17_000);
         assert_eq!(report.max_main_loop_period_cycles(), 17_000);
         assert_eq!(report.mean_main_loop_period_milli_cycles(), 17_000_000);
     }
