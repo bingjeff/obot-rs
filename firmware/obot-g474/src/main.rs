@@ -88,7 +88,6 @@ fn firmware_main() -> ! {
     let mut output_safety_sequence = 0;
     let mut bus_voltage_sequence = 0;
     let mut text_api_request_sequence = 0;
-    let mut usb_text_api_request = [0; TEXT_API_PAYLOAD_LEN];
     let mut last_driver_report = Drv8323sConfigReport::default();
     let mut last_benchmark_report = BenchmarkReport::default();
     let mut host_watchdog = HostCommandWatchdog::new(HOST_COMMAND_TIMEOUT_MAIN_TICKS);
@@ -195,14 +194,6 @@ fn firmware_main() -> ! {
                     output_safety_status,
                     bus_voltage_raw,
                 );
-                service_usb_text_api(
-                    &mut usb_text_api_request,
-                    last_benchmark_report,
-                    controller_state,
-                    last_driver_report,
-                    output_safety_status,
-                    bus_voltage_raw,
-                );
                 core::hint::black_box((host_poll, host_status, controller_state.fault));
             });
             if driver_action_completed {
@@ -212,6 +203,7 @@ fn firmware_main() -> ! {
                 last_benchmark_report = BenchmarkReport::default();
             } else {
                 last_benchmark_report = BenchmarkReport::from_loops(fast_benchmark, main_benchmark);
+                obot_g474::usb::publish_text_api_benchmark(last_benchmark_report);
                 benchmark_sequence =
                     publish_benchmark_report(benchmark_sequence, last_benchmark_report);
             }
@@ -336,41 +328,6 @@ fn service_text_api_debug(
 }
 
 #[cfg(target_os = "none")]
-#[inline(never)]
-fn service_usb_text_api(
-    request_buffer: &mut [u8; TEXT_API_PAYLOAD_LEN],
-    benchmark_report: BenchmarkReport,
-    controller_state: obot_core::MotorState,
-    driver_report: Drv8323sConfigReport,
-    output_safety_status: OutputSafetyStatus,
-    bus_voltage_raw: u16,
-) {
-    let Some(request_len) = obot_g474::usb::poll_text_api_request(request_buffer) else {
-        return;
-    };
-
-    let mut response = [0; TEXT_API_PAYLOAD_LEN];
-    let response_len = match core::str::from_utf8(&request_buffer[..request_len]) {
-        Ok(request) => match dispatch_firmware_text_api(
-            request,
-            &mut response,
-            benchmark_report,
-            controller_state,
-            driver_report,
-            output_safety_status,
-            bus_voltage_raw,
-        ) {
-            Ok(response_text) => response_text.len(),
-            Err(_) => 0,
-        },
-        Err(_) => 0,
-    };
-
-    let accepted = obot_g474::usb::send_text_api_response(&response[..response_len]);
-    core::hint::black_box((request_len, response_len, accepted));
-}
-
-#[cfg(target_os = "none")]
 const CPU_FREQUENCY_HZ: u32 = 170_000_000;
 
 #[cfg(target_os = "none")]
@@ -425,8 +382,7 @@ const TEXT_API_NAMES: &[&str] = &[
     "usb_interrupt_count",
     "usb_error_count",
     "usb_text_rx_total",
-    "usb_text_rx_dropped",
-    "usb_text_poll_total",
+    "usb_text_rx_unsupported",
     "usb_text_tx_total",
     "usb_text_tx_busy",
     "usb_text_rx_last_len",
@@ -573,8 +529,7 @@ fn format_firmware_text_api_value<'out>(
         "usb_interrupt_count" => ApiValue::U32(obot_g474::usb::interrupt_count()),
         "usb_error_count" => ApiValue::U32(obot_g474::usb::error_count()),
         "usb_text_rx_total" => ApiValue::U32(obot_g474::usb::text_rx_total()),
-        "usb_text_rx_dropped" => ApiValue::U32(obot_g474::usb::text_rx_dropped()),
-        "usb_text_poll_total" => ApiValue::U32(obot_g474::usb::text_poll_total()),
+        "usb_text_rx_unsupported" => ApiValue::U32(obot_g474::usb::text_rx_unsupported()),
         "usb_text_tx_total" => ApiValue::U32(obot_g474::usb::text_tx_total()),
         "usb_text_tx_busy" => ApiValue::U32(obot_g474::usb::text_tx_busy()),
         "usb_text_rx_last_len" => ApiValue::U8(obot_g474::usb::text_rx_last_len()),

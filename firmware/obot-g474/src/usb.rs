@@ -1,7 +1,7 @@
-use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
+use obot_core::benchmark::BenchmarkReport;
 use obot_protocol::usb_control::{self, ControlRequest, ControlResponse, SetupPacket};
 
 const RCC_BASE: usize = 0x4002_1000;
@@ -109,24 +109,19 @@ const NO_PENDING_ADDRESS: u8 = 0xFF;
 const CONFIGURATION_STRING: &str = "obot-rs rust firmware";
 const INTERFACE_STRING: &str = "rust_debug";
 
-struct TextRxStorage(UnsafeCell<[u8; usb_control::BULK_MAX_PACKET_SIZE as usize]>);
-
-unsafe impl Sync for TextRxStorage {}
-
 static USB_LP_INTERRUPT_COUNT: AtomicU32 = AtomicU32::new(0);
 static USB_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
 static PENDING_ADDRESS: AtomicU8 = AtomicU8::new(NO_PENDING_ADDRESS);
-static TEXT_RX_LEN: AtomicU8 = AtomicU8::new(0);
 static TEXT_RX_LAST_LEN: AtomicU8 = AtomicU8::new(0);
 static TEXT_TX_LAST_LEN: AtomicU8 = AtomicU8::new(0);
 static TEXT_RX_TOTAL: AtomicU32 = AtomicU32::new(0);
-static TEXT_RX_DROPPED: AtomicU32 = AtomicU32::new(0);
-static TEXT_POLL_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TEXT_RX_UNSUPPORTED: AtomicU32 = AtomicU32::new(0);
 static TEXT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static TEXT_TX_BUSY: AtomicU32 = AtomicU32::new(0);
-static TEXT_RX_BUFFER: TextRxStorage = TextRxStorage(UnsafeCell::new(
-    [0; usb_control::BULK_MAX_PACKET_SIZE as usize],
-));
+static BENCH_T_EXEC_FASTLOOP: AtomicU32 = AtomicU32::new(0);
+static BENCH_T_PERIOD_FASTLOOP: AtomicU32 = AtomicU32::new(0);
+static BENCH_T_EXEC_MAINLOOP: AtomicU32 = AtomicU32::new(0);
+static BENCH_T_PERIOD_MAINLOOP: AtomicU32 = AtomicU32::new(0);
 
 pub struct UsbDevice;
 
@@ -177,12 +172,8 @@ pub fn text_rx_total() -> u32 {
     TEXT_RX_TOTAL.load(Ordering::Relaxed)
 }
 
-pub fn text_rx_dropped() -> u32 {
-    TEXT_RX_DROPPED.load(Ordering::Relaxed)
-}
-
-pub fn text_poll_total() -> u32 {
-    TEXT_POLL_TOTAL.load(Ordering::Relaxed)
+pub fn text_rx_unsupported() -> u32 {
+    TEXT_RX_UNSUPPORTED.load(Ordering::Relaxed)
 }
 
 pub fn text_tx_total() -> u32 {
@@ -201,35 +192,11 @@ pub fn text_tx_last_len() -> u8 {
     TEXT_TX_LAST_LEN.load(Ordering::Relaxed)
 }
 
-pub fn poll_text_api_request(
-    output: &mut [u8; usb_control::BULK_MAX_PACKET_SIZE as usize],
-) -> Option<usize> {
-    let len = TEXT_RX_LEN.load(Ordering::Acquire);
-    if len == 0 {
-        return None;
-    }
-
-    let len = len as usize;
-    unsafe {
-        let input = &*TEXT_RX_BUFFER.0.get();
-        output[..len].copy_from_slice(&input[..len]);
-    }
-    TEXT_RX_LEN.store(0, Ordering::Release);
-    TEXT_POLL_TOTAL.fetch_add(1, Ordering::Relaxed);
-    endpoint_set_toggle(1, USB_EP_RX_VALID, USB_EPRX_STAT);
-    Some(len)
-}
-
-pub fn send_text_api_response(data: &[u8]) -> bool {
-    if tx_active(1) {
-        TEXT_TX_BUSY.fetch_add(1, Ordering::Relaxed);
-        set_tx_nak(1);
-    }
-
-    send_data(1, data);
-    TEXT_TX_LAST_LEN.store(data.len() as u8, Ordering::Relaxed);
-    TEXT_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
-    true
+pub fn publish_text_api_benchmark(report: BenchmarkReport) {
+    BENCH_T_EXEC_FASTLOOP.store(report.t_exec_fastloop(), Ordering::Relaxed);
+    BENCH_T_PERIOD_FASTLOOP.store(report.t_period_fastloop(), Ordering::Relaxed);
+    BENCH_T_EXEC_MAINLOOP.store(report.t_exec_mainloop(), Ordering::Relaxed);
+    BENCH_T_PERIOD_MAINLOOP.store(report.t_period_mainloop(), Ordering::Relaxed);
 }
 
 fn enable_gpioa_clock() {
@@ -314,22 +281,16 @@ fn handle_text_endpoint_transfer(istr: u16) {
     if istr & USB_ISTR_DIR != 0 {
         clear_endpoint_ctr_rx(1);
         let byte_count = read_btable(1, BTABLE_COUNT_RX) & USB_COUNT_RX_COUNT_MASK;
-        if TEXT_RX_LEN.load(Ordering::Acquire) == 0 {
-            let len = core::cmp::min(
-                byte_count as usize,
-                usb_control::BULK_MAX_PACKET_SIZE as usize,
-            );
-            unsafe {
-                let output = &mut *TEXT_RX_BUFFER.0.get();
-                read_pma_bytes(EP1_RX_OFFSET, &mut output[..len], len);
-            }
-            TEXT_RX_LAST_LEN.store(len as u8, Ordering::Relaxed);
-            TEXT_RX_TOTAL.fetch_add(1, Ordering::Relaxed);
-            TEXT_RX_LEN.store(len as u8, Ordering::Release);
-        } else {
-            TEXT_RX_DROPPED.fetch_add(1, Ordering::Relaxed);
-        }
+        let len = core::cmp::min(
+            byte_count as usize,
+            usb_control::BULK_MAX_PACKET_SIZE as usize,
+        );
+        let mut request = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
+        read_pma_bytes(EP1_RX_OFFSET, &mut request[..len], len);
+        TEXT_RX_LAST_LEN.store(len as u8, Ordering::Relaxed);
+        TEXT_RX_TOTAL.fetch_add(1, Ordering::Relaxed);
         endpoint_set_toggle(1, USB_EP_RX_VALID, USB_EPRX_STAT);
+        send_text_api_response_immediate(&request[..len]);
     }
 
     if read16(endpoint_register(1)) & USB_EP_CTR_TX != 0 {
@@ -347,6 +308,120 @@ fn handle_realtime_endpoint_transfer(istr: u16) {
     if read16(endpoint_register(2)) & USB_EP_CTR_TX != 0 {
         clear_endpoint_ctr_tx(2);
     }
+}
+
+const USB_TEXT_API_NAMES: &[&str] = &[
+    "api_length",
+    "api_name",
+    "cpu_frequency",
+    "messages_version",
+    "t_exec_fastloop",
+    "t_period_fastloop",
+    "t_exec_mainloop",
+    "t_period_mainloop",
+    "usb_interrupt_count",
+    "usb_error_count",
+    "usb_text_rx_total",
+    "usb_text_rx_unsupported",
+    "usb_text_tx_total",
+    "usb_text_tx_busy",
+    "usb_text_rx_last_len",
+    "usb_text_tx_last_len",
+];
+
+fn send_text_api_response_immediate(request: &[u8]) {
+    let mut response = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
+    let Some(response_len) = format_text_api_response(request, &mut response) else {
+        TEXT_RX_UNSUPPORTED.fetch_add(1, Ordering::Relaxed);
+        send_text_api_packet(&[]);
+        return;
+    };
+
+    send_text_api_packet(&response[..response_len]);
+}
+
+fn send_text_api_packet(data: &[u8]) {
+    if tx_active(1) {
+        TEXT_TX_BUSY.fetch_add(1, Ordering::Relaxed);
+        set_tx_nak(1);
+    }
+    send_data(1, data);
+    TEXT_TX_LAST_LEN.store(data.len() as u8, Ordering::Relaxed);
+    TEXT_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> {
+    if request == b"api_length" {
+        return write_u32_decimal(USB_TEXT_API_NAMES.len() as u32, output);
+    }
+    if let Some(index_bytes) = request.strip_prefix(b"api_name=") {
+        let index = parse_decimal_usize(index_bytes)?;
+        let name = USB_TEXT_API_NAMES.get(index)?;
+        return write_bytes(name.as_bytes(), output);
+    }
+
+    match request {
+        b"cpu_frequency" => write_u32_decimal(170_000_000, output),
+        b"messages_version" => write_bytes(b"3.3", output),
+        b"t_exec_fastloop" => {
+            write_u32_decimal(BENCH_T_EXEC_FASTLOOP.load(Ordering::Relaxed), output)
+        }
+        b"t_period_fastloop" => {
+            write_u32_decimal(BENCH_T_PERIOD_FASTLOOP.load(Ordering::Relaxed), output)
+        }
+        b"t_exec_mainloop" => {
+            write_u32_decimal(BENCH_T_EXEC_MAINLOOP.load(Ordering::Relaxed), output)
+        }
+        b"t_period_mainloop" => {
+            write_u32_decimal(BENCH_T_PERIOD_MAINLOOP.load(Ordering::Relaxed), output)
+        }
+        b"usb_interrupt_count" => write_u32_decimal(interrupt_count(), output),
+        b"usb_error_count" => write_u32_decimal(error_count(), output),
+        b"usb_text_rx_total" => write_u32_decimal(text_rx_total(), output),
+        b"usb_text_rx_unsupported" => write_u32_decimal(text_rx_unsupported(), output),
+        b"usb_text_tx_total" => write_u32_decimal(text_tx_total(), output),
+        b"usb_text_tx_busy" => write_u32_decimal(text_tx_busy(), output),
+        b"usb_text_rx_last_len" => write_u32_decimal(text_rx_last_len() as u32, output),
+        b"usb_text_tx_last_len" => write_u32_decimal(text_tx_last_len() as u32, output),
+        _ => None,
+    }
+}
+
+fn parse_decimal_usize(input: &[u8]) -> Option<usize> {
+    if input.is_empty() {
+        return None;
+    }
+    let mut value = 0_usize;
+    for &byte in input {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
+    }
+    Some(value)
+}
+
+fn write_u32_decimal(value: u32, output: &mut [u8]) -> Option<usize> {
+    let mut scratch = [0; 10];
+    let mut value = value;
+    let mut index = scratch.len();
+    loop {
+        index -= 1;
+        scratch[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    write_bytes(&scratch[index..], output)
+}
+
+fn write_bytes(bytes: &[u8], output: &mut [u8]) -> Option<usize> {
+    if bytes.len() > output.len() {
+        return None;
+    }
+    output[..bytes.len()].copy_from_slice(bytes);
+    Some(bytes.len())
 }
 
 fn handle_ep0_setup() {
@@ -621,4 +696,54 @@ fn read16(address: usize) -> u16 {
 fn write16(address: usize, value: u16) {
     // SAFETY: The caller passes STM32G474 memory-mapped register addresses.
     unsafe { write_volatile(address as *mut u16, value) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn immediate_text_api_exposes_run_stats_fields() {
+        publish_text_api_benchmark(BenchmarkReport {
+            fast: obot_core::benchmark::LoopBenchmarkSnapshot {
+                period: obot_core::benchmark::CycleStatsSnapshot {
+                    last_cycles: 3399,
+                    ..obot_core::benchmark::CycleStatsSnapshot::default()
+                },
+                execution: obot_core::benchmark::CycleStatsSnapshot {
+                    last_cycles: 305,
+                    ..obot_core::benchmark::CycleStatsSnapshot::default()
+                },
+            },
+            main: obot_core::benchmark::LoopBenchmarkSnapshot {
+                period: obot_core::benchmark::CycleStatsSnapshot {
+                    last_cycles: 16995,
+                    ..obot_core::benchmark::CycleStatsSnapshot::default()
+                },
+                execution: obot_core::benchmark::CycleStatsSnapshot {
+                    last_cycles: 1116,
+                    ..obot_core::benchmark::CycleStatsSnapshot::default()
+                },
+            },
+        });
+
+        let mut output = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
+        let len = format_text_api_response(b"api_length", &mut output).unwrap();
+        assert_eq!(&output[..len], b"16");
+
+        let len = format_text_api_response(b"api_name=4", &mut output).unwrap();
+        assert_eq!(&output[..len], b"t_exec_fastloop");
+
+        let len = format_text_api_response(b"t_exec_fastloop", &mut output).unwrap();
+        assert_eq!(&output[..len], b"305");
+        let len = format_text_api_response(b"t_period_fastloop", &mut output).unwrap();
+        assert_eq!(&output[..len], b"3399");
+        let len = format_text_api_response(b"t_exec_mainloop", &mut output).unwrap();
+        assert_eq!(&output[..len], b"1116");
+        let len = format_text_api_response(b"t_period_mainloop", &mut output).unwrap();
+        assert_eq!(&output[..len], b"16995");
+
+        assert_eq!(format_text_api_response(b"unknown", &mut output), None);
+        assert_eq!(format_text_api_response(b"api_name=999", &mut output), None);
+    }
 }
