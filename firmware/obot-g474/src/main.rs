@@ -96,6 +96,11 @@ fn firmware_main() -> ! {
             core::hint::spin_loop();
         }
     }
+    if clock::configure_usb_hsi48_crs().is_err() {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
 
     let cycle_counter = DwtCycleCounter::new();
     cycle_counter.enable();
