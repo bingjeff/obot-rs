@@ -1871,11 +1871,18 @@ fn powered_ready_proof_usb(options: &PoweredReadyProofUsbOptions) -> Result<Stri
         "driver_powered_ready",
         &format_usb_driver_check_csv(DEFAULT_NAME, driver_result),
     );
-    if driver_result.check_passed {
+    if powered_ready_proof_passed(driver_result) {
         Ok(output)
     } else {
         Err(command_failure(output))
     }
+}
+
+fn powered_ready_proof_passed(result: UsbDriverCheckResult) -> bool {
+    result.check_passed
+        && result.post_disable.sent
+        && result.post_disable.driver_not_enabled
+        && result.post_disable.command_version == result.post_disable.consumed_version
 }
 
 fn powered_ready_driver_options(options: &PoweredReadyProofUsbOptions) -> DriverCheckUsbOptions {
@@ -4662,6 +4669,57 @@ mod tests {
 
         assert_eq!(command_failure_message(&failure), Some("csv result\n"));
         assert_eq!(command_failure_message("parse error"), None);
+    }
+
+    #[test]
+    fn powered_ready_proof_requires_cleanup() {
+        let status = StatusPacket {
+            sequence: 1,
+            state: obot_core::MotorState::default(),
+        };
+        let result = UsbDriverCheckResult {
+            command: DriverCommand::ConfigureEnable,
+            immediate_status: status,
+            fields: UsbDriverCheckFields {
+                driver_configured: true,
+                verify_error_mask: 0,
+                transfer_error_mask: 0,
+                status_before: 0,
+                status_after: 0,
+                output_allowed: false,
+                bus_blocked: false,
+                driver_not_enabled: false,
+                bus_voltage_raw: 2500,
+                bridge_output_disable_status: 0,
+                bridge_outputs_disabled: true,
+                bridge_outputs_enabled: false,
+                bridge_prearm_ready: true,
+                bridge_prearm_blockers: 0,
+            },
+            post_disable: UsbDriverPostDisableFields {
+                sent: true,
+                driver_not_enabled: true,
+                command_version: 22,
+                consumed_version: 22,
+            },
+            report_observed: true,
+            expectation: DriverCheckExpectation::PoweredReady,
+            check_passed: true,
+        };
+
+        assert!(powered_ready_proof_passed(result));
+
+        let mut missing_cleanup = result;
+        missing_cleanup.post_disable.sent = false;
+        assert!(!powered_ready_proof_passed(missing_cleanup));
+
+        let mut still_enabled = result;
+        still_enabled.post_disable.driver_not_enabled = false;
+        assert!(!powered_ready_proof_passed(still_enabled));
+
+        let mut stale_cleanup = result;
+        stale_cleanup.post_disable.consumed_version = 20;
+        assert!(!powered_ready_proof_passed(stale_cleanup));
     }
 
     #[test]
