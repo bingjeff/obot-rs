@@ -609,3 +609,82 @@ Current comparison:
 This is the current best Rust measured path with live hall-derived electrical angle, current conversion, FOC transforms, current filtering, PI current control, voltage command generation, and candidate PWM compare computation. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not yet applied to HRTIM in the benchmarked path, bridge outputs remain disabled, live host commands are absent, and full bus-voltage/fault gating is not implemented.
 
 The current Rust fast-loop mean is below the recorded C++ no-voltage `motor_hall` fast-loop mean (`424.918` cycles Rust versus `708.965` cycles C++), and the Rust combined mean load remains below C++ (`13.30%` versus `41.77%`). The Rust max sample is still higher than the C++ max fast-loop sample (`935` cycles Rust versus `710` cycles C++), so max-latency variance remains a tracking item as output gating and host command handling are added.
+
+
+
+## 2026-05-31: Bus Voltage Monitor With Cached Fast-Loop Gate, J-Link Debug Readout
+
+Firmware commits:
+
+- `8b1c546 Add bus voltage output gate`
+- `5c96bb1 Use raw bus voltage gate in fast loop`
+- `aaafbfb Measure bus gate without command masking`
+- `efb841e Match motor_hall bus voltage limits`
+- `8432105 Split bus gate benchmark retention`
+- `80cd0eb Monitor bus voltage from main loop`
+- `cbebe67 Keep FOC benchmark retention separate`
+- `660a9b9 Isolate bus voltage monitor codegen`
+- `143021b Gate fast loop from cached bus voltage`
+
+Change under test:
+
+- Added ADC1/OPAMP1 setup for the active `motor_hall` bus-voltage channel.
+- Added Rust bus-voltage calibration and output limits matching the active C++ config: `vbus_gain = 1.0 / 4096 * (215 + 13.7) / 13.7`, default `vbus_min = 8 V`, default `vbus_max = 60 V`.
+- Measured the direct ADC1 fast-loop read path and found it raised mean fast-loop execution to roughly `975-1030` cycles.
+- Current staged design updates a cached bus-voltage raw sample in the 10 kHz main loop and evaluates the output gate from that cached sample in the 50 kHz fast loop.
+- Bridge outputs remain disabled; the measured fast loop still writes zero PWM and computes candidate compares only.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+```
+
+Diagnostic readouts during this increment:
+
+```text
+Fast-loop ADC1 read plus raw gate:       rust_debug, 1001, 3488, 143, 17623, 1000.371, 3397.197, 141.784, 16902.697
+Fast-loop ADC1 read, no command mask:    rust_debug, 975, 3468, 140, 17003, 974.989, 3397.483, 139.625, 16912.162
+ADC1 initialized, no fast-loop DR read:  rust_debug, 941, 3439, 142, 17001, 440.445, 3397.699, 141.650, 16915.753
+Cached fast-loop gate current best:      rust_debug, 927, 3569, 269, 17008, 436.896, 3397.505, 268.724, 16910.021
+```
+
+Release artifact sizes for current best:
+
+```text
+135876 target/thumbv7em-none-eabihf/release/obot-g474
+ 13856 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+`arm-none-eabi-size` for current best:
+
+```text
+   text   data    bss    dec    hex filename
+  13856      0     84  13940   3674 target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+Representative readout after flashing current best:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 927, 3569, 269, 17008, 436.896, 3397.505, 268.724, 16910.021
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `436.896 cycles = 2.570 us`.
+- Main-loop mean execution: `268.724 cycles = 1.581 us`.
+- Combined 100 us max load: `(5 * 927 + 269) / 17000 = 28.85%`.
+- Combined 100 us mean load: `(5 * 436.896 + 268.724) / 17000 = 14.43%`.
+- Incremental mean fast-loop cost over integer-clamped PWM compare: `436.896 - 424.918 = 11.978 cycles = 0.070 us`.
+- Incremental mean main-loop cost over integer-clamped PWM compare: `268.724 - 135.873 = 132.851 cycles = 0.781 us`.
+
+Current comparison:
+
+This Rust path now includes live hall-derived electrical angle, current conversion, FOC transforms, current filtering, PI current control, voltage command generation, candidate PWM compare computation, ADC1 bus-voltage monitoring, and a cached fast-loop output-gate decision. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not yet applied to HRTIM, bridge outputs remain disabled, live host commands are absent, driver fault handling is absent, and full safe-mode/fault behavior is not implemented.
+
+The current Rust fast-loop mean remains below the recorded C++ no-voltage `motor_hall` fast-loop mean (`436.896` cycles Rust versus `708.965` cycles C++), and Rust combined mean load remains below C++ (`14.43%` versus `41.77%`). Rust combined max load is also below C++ (`28.85%` versus `58.79%`), but the Rust max fast-loop sample remains higher than the C++ fast-loop max (`927` cycles Rust versus `710` cycles C++), so max-latency variance remains a tracking item.
