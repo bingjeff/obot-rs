@@ -17,7 +17,13 @@ const DEFAULT_ADDRESS: u32 = 0x2000_0000;
 const DEFAULT_SPEED_KHZ: u32 = 4_000;
 const DEFAULT_ELF_PATH: &str = "target/thumbv7em-none-eabihf/release/obot-g474";
 const BENCHMARK_PACKET_SYMBOL: &str = "OBOT_BENCHMARK_PACKET";
+const COMMAND_PACKET_SYMBOL: &str = "OBOT_COMMAND_PACKET";
+const COMMAND_SEQUENCE_SYMBOL: &str = "OBOT_COMMAND_PACKET_SEQUENCE";
+const DRIVER_COMMAND_PACKET_SYMBOL: &str = "OBOT_DRIVER_COMMAND_PACKET";
+const DRIVER_COMMAND_SEQUENCE_SYMBOL: &str = "OBOT_DRIVER_COMMAND_PACKET_SEQUENCE";
+const DRIVER_REPORT_PACKET_SYMBOL: &str = "OBOT_DRIVER_REPORT_PACKET";
 const OUTPUT_SAFETY_PACKET_SYMBOL: &str = "OBOT_OUTPUT_SAFETY_PACKET";
+const STATUS_PACKET_SYMBOL: &str = "OBOT_STATUS_PACKET";
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -149,14 +155,16 @@ fn run_stats_jlink_command(args: &[String]) -> Result<String, String> {
 }
 
 fn read_status_jlink_command(args: &[String]) -> Result<String, String> {
-    let options = JlinkOptions::parse(args)?;
-    let bytes = read_jlink_bytes(&options, STATUS_PACKET_LEN)?;
+    let options = SymbolReadOptions::parse(args)?;
+    let jlink = options.resolve(STATUS_PACKET_SYMBOL)?;
+    let bytes = read_jlink_bytes(&jlink, STATUS_PACKET_LEN)?;
     decode_status_csv(&bytes)
 }
 
 fn read_driver_jlink_command(args: &[String]) -> Result<String, String> {
-    let options = JlinkOptions::parse(args)?;
-    let bytes = read_jlink_bytes(&options, DRIVER_REPORT_PACKET_LEN)?;
+    let options = SymbolReadOptions::parse(args)?;
+    let jlink = options.resolve(DRIVER_REPORT_PACKET_SYMBOL)?;
+    let bytes = read_jlink_bytes(&jlink, DRIVER_REPORT_PACKET_LEN)?;
     decode_driver_csv(&bytes)
 }
 
@@ -196,7 +204,7 @@ fn jlink_script_command(args: &[String]) -> Result<String, String> {
 }
 
 fn write_command_jlink_command(args: &[String]) -> Result<String, String> {
-    let options = CommandWriteOptions::parse(args)?;
+    let options = CommandWriteOptions::parse(args)?.resolve()?;
     let packet = CommandPacket {
         sequence: options.sequence,
         command: MotorCommand {
@@ -233,7 +241,7 @@ fn write_command_jlink_command(args: &[String]) -> Result<String, String> {
 }
 
 fn write_driver_command_jlink_command(args: &[String]) -> Result<String, String> {
-    let options = DriverCommandWriteOptions::parse(args)?;
+    let options = DriverCommandWriteOptions::parse(args)?.resolve()?;
     let packet = DriverCommandPacket {
         sequence: options.sequence,
         command: options.command,
@@ -386,8 +394,21 @@ impl SymbolReadOptions {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct CommandWriteOptions {
+    jlink: JlinkOptions,
+    packet_address: Option<u32>,
+    sequence_address: Option<u32>,
+    elf_path: PathBuf,
+    sequence: u8,
+    mode: ControlMode,
+    torque_nm: f32,
+    velocity_rad_s: f32,
+    position_rad: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ResolvedCommandWriteOptions {
     jlink: JlinkOptions,
     packet_address: u32,
     sequence_address: u32,
@@ -398,8 +419,18 @@ struct CommandWriteOptions {
     position_rad: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct DriverCommandWriteOptions {
+    jlink: JlinkOptions,
+    packet_address: Option<u32>,
+    sequence_address: Option<u32>,
+    elf_path: PathBuf,
+    sequence: u8,
+    command: DriverCommand,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ResolvedDriverCommandWriteOptions {
     jlink: JlinkOptions,
     packet_address: u32,
     sequence_address: u32,
@@ -415,27 +446,31 @@ impl DriverCommandWriteOptions {
                 speed_khz: DEFAULT_SPEED_KHZ,
                 device: DEFAULT_DEVICE,
             },
-            packet_address: 0,
-            sequence_address: 0,
+            packet_address: None,
+            sequence_address: None,
+            elf_path: PathBuf::from(DEFAULT_ELF_PATH),
             sequence: 1,
             command: DriverCommand::Disable,
         };
-        let mut packet_address_set = false;
-        let mut sequence_address_set = false;
 
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
                 "--packet-address" => {
                     index += 1;
-                    options.packet_address = parse_u32_arg(args.get(index), "--packet-address")?;
-                    packet_address_set = true;
+                    options.packet_address = Some(parse_u32_arg(args.get(index), "--packet-address")?);
                 }
                 "--sequence-address" => {
                     index += 1;
                     options.sequence_address =
-                        parse_u32_arg(args.get(index), "--sequence-address")?;
-                    sequence_address_set = true;
+                        Some(parse_u32_arg(args.get(index), "--sequence-address")?);
+                }
+                "--elf" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--elf requires a value".to_string())?;
+                    options.elf_path = PathBuf::from(path);
                 }
                 "--sequence" => {
                     index += 1;
@@ -471,14 +506,28 @@ impl DriverCommandWriteOptions {
             index += 1;
         }
 
-        if !packet_address_set {
-            return Err("write-driver-command-jlink requires --packet-address".to_string());
-        }
-        if !sequence_address_set {
-            return Err("write-driver-command-jlink requires --sequence-address".to_string());
-        }
-
         Ok(options)
+    }
+
+    fn resolve(self) -> Result<ResolvedDriverCommandWriteOptions, String> {
+        let packet_address = resolve_optional_symbol_address(
+            self.packet_address,
+            &self.elf_path,
+            DRIVER_COMMAND_PACKET_SYMBOL,
+        )?;
+        let sequence_address = resolve_optional_symbol_address(
+            self.sequence_address,
+            &self.elf_path,
+            DRIVER_COMMAND_SEQUENCE_SYMBOL,
+        )?;
+
+        Ok(ResolvedDriverCommandWriteOptions {
+            jlink: self.jlink,
+            packet_address,
+            sequence_address,
+            sequence: self.sequence,
+            command: self.command,
+        })
     }
 }
 
@@ -490,30 +539,34 @@ impl CommandWriteOptions {
                 speed_khz: DEFAULT_SPEED_KHZ,
                 device: DEFAULT_DEVICE,
             },
-            packet_address: 0,
-            sequence_address: 0,
+            packet_address: None,
+            sequence_address: None,
+            elf_path: PathBuf::from(DEFAULT_ELF_PATH),
             sequence: 1,
             mode: ControlMode::Disabled,
             torque_nm: 0.0,
             velocity_rad_s: 0.0,
             position_rad: 0.0,
         };
-        let mut packet_address_set = false;
-        let mut sequence_address_set = false;
 
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
                 "--packet-address" => {
                     index += 1;
-                    options.packet_address = parse_u32_arg(args.get(index), "--packet-address")?;
-                    packet_address_set = true;
+                    options.packet_address = Some(parse_u32_arg(args.get(index), "--packet-address")?);
                 }
                 "--sequence-address" => {
                     index += 1;
                     options.sequence_address =
-                        parse_u32_arg(args.get(index), "--sequence-address")?;
-                    sequence_address_set = true;
+                        Some(parse_u32_arg(args.get(index), "--sequence-address")?);
+                }
+                "--elf" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--elf requires a value".to_string())?;
+                    options.elf_path = PathBuf::from(path);
                 }
                 "--sequence" => {
                     index += 1;
@@ -561,14 +614,31 @@ impl CommandWriteOptions {
             index += 1;
         }
 
-        if !packet_address_set {
-            return Err("write-command-jlink requires --packet-address".to_string());
-        }
-        if !sequence_address_set {
-            return Err("write-command-jlink requires --sequence-address".to_string());
-        }
-
         Ok(options)
+    }
+
+    fn resolve(self) -> Result<ResolvedCommandWriteOptions, String> {
+        let packet_address = resolve_optional_symbol_address(
+            self.packet_address,
+            &self.elf_path,
+            COMMAND_PACKET_SYMBOL,
+        )?;
+        let sequence_address = resolve_optional_symbol_address(
+            self.sequence_address,
+            &self.elf_path,
+            COMMAND_SEQUENCE_SYMBOL,
+        )?;
+
+        Ok(ResolvedCommandWriteOptions {
+            jlink: self.jlink,
+            packet_address,
+            sequence_address,
+            sequence: self.sequence,
+            mode: self.mode,
+            torque_nm: self.torque_nm,
+            velocity_rad_s: self.velocity_rad_s,
+            position_rad: self.position_rad,
+        })
     }
 }
 
@@ -615,6 +685,17 @@ fn parse_u32(value: &str) -> Option<u32> {
             || value.parse().ok(),
             |hex| u32::from_str_radix(hex, 16).ok(),
         )
+}
+
+fn resolve_optional_symbol_address(
+    address: Option<u32>,
+    path: &Path,
+    symbol: &str,
+) -> Result<u32, String> {
+    match address {
+        Some(address) => Ok(address),
+        None => resolve_symbol_address(path, symbol),
+    }
 }
 
 fn resolve_symbol_address(path: &Path, symbol: &str) -> Result<u32, String> {
@@ -713,7 +794,7 @@ fn jlink_read_script(options: &JlinkOptions, len: usize) -> String {
     )
 }
 
-fn jlink_write_command_script(options: &CommandWriteOptions, encoded_packet: &[u8]) -> String {
+fn jlink_write_command_script(options: &ResolvedCommandWriteOptions, encoded_packet: &[u8]) -> String {
     jlink_write_raw_packet_script(
         &options.jlink,
         options.packet_address,
@@ -1013,11 +1094,11 @@ fn usage() -> String {
   obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
-  obot-bench-debug read-status-jlink --address <status-packet-address> [--speed 4000]
-  obot-bench-debug read-driver-jlink --address <driver-report-address> [--speed 4000]
+  obot-bench-debug read-status-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <status-packet-address>] [--speed 4000]
+  obot-bench-debug read-driver-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <driver-report-address>] [--speed 4000]
   obot-bench-debug read-output-safety-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <output-safety-address>] [--speed 4000]
-  obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
-  obot-bench-debug write-driver-command-jlink --packet-address <driver-command-packet-address> --sequence-address <driver-command-sequence-address> [--sequence N] [--command disable|configure-enable]
+  obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
+  obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
 ",
         BENCHMARK_PACKET_LEN,
         BENCHMARK_PACKET_LEN,
@@ -1259,8 +1340,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(options.packet_address, 0x2000_0090);
-        assert_eq!(options.sequence_address, 0x2000_0092);
+        assert_eq!(options.packet_address, Some(0x2000_0090));
+        assert_eq!(options.sequence_address, Some(0x2000_0092));
         assert_eq!(options.sequence, 8);
         assert_eq!(options.command, DriverCommand::ConfigureEnable);
     }
@@ -1281,8 +1362,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(options.packet_address, 0x2000_0090);
-        assert_eq!(options.sequence_address, 0x2000_009e);
+        assert_eq!(options.packet_address, Some(0x2000_0090));
+        assert_eq!(options.sequence_address, Some(0x2000_009e));
         assert_eq!(options.sequence, 7);
         assert_eq!(options.mode, ControlMode::Torque);
         assert_eq!(options.torque_nm, 1.5);
@@ -1302,7 +1383,7 @@ mod tests {
 
     #[test]
     fn builds_command_write_script_with_packet_before_sequence() {
-        let options = CommandWriteOptions {
+        let options = ResolvedCommandWriteOptions {
             jlink: JlinkOptions {
                 address: DEFAULT_ADDRESS,
                 speed_khz: DEFAULT_SPEED_KHZ,
