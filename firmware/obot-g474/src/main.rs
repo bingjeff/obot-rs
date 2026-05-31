@@ -28,7 +28,7 @@ use obot_core::{
 #[cfg(target_os = "none")]
 use obot_core::{
     current::CurrentCalibration,
-    foc::{FocController, FocParam},
+    foc::{FocDesired, MotorHallFocController},
     hall::{HallElectricalAngle, HallMotionEstimate, HallMotionEstimator},
     host::{HostCommandWatchdog, HostCommandWatchdogStatus},
     outer_loop::{MotorHallOuterLoop, MotorHallOuterLoopParam},
@@ -167,8 +167,8 @@ fn firmware_main() -> ! {
         obot_core::MotorState::default(),
         HallMotionEstimate::default(),
     );
-    let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
-    foc.current_mode();
+    let mut foc = MotorHallFocController::new(FAST_LOOP_DT_S);
+    foc.initialize();
     usb.connect();
 
     core::hint::black_box(pwm.config());
@@ -352,8 +352,8 @@ struct FastLoopContext {
     hall: HallInputs,
     current_adc: CurrentAdc,
     hall_count: i32,
-    foc: FocController,
-    foc_desired: obot_core::foc::FocDesired,
+    foc: MotorHallFocController,
+    foc_desired: FocDesired,
     output_allowed: bool,
 }
 
@@ -364,8 +364,8 @@ impl FastLoopContext {
         pwm: SafeZeroPwm,
         hall: HallInputs,
         current_adc: CurrentAdc,
-        foc: FocController,
-        foc_desired: obot_core::foc::FocDesired,
+        foc: MotorHallFocController,
+        foc_desired: FocDesired,
         output_allowed: bool,
     ) -> Self {
         Self {
@@ -387,7 +387,7 @@ impl FastLoopContext {
         self.hall_count = hall_sample.count;
         let hall_sincos = HallElectricalAngle::motor_hall_sincos_hall_count(hall_sample.hall_count);
         let currents = CurrentCalibration::motor_hall_convert(self.current_adc.read_samples());
-        let voltage_command = self.foc.step_current_mode_voltage_command_with_sincos(
+        let voltage_command = self.foc.step_voltage_command_with_sincos(
             self.foc_desired,
             currents,
             hall_sincos.sin,
@@ -399,7 +399,7 @@ impl FastLoopContext {
         self.benchmark.finish(sample, self.cycle_counter.now());
     }
 
-    fn set_command(&mut self, foc_desired: obot_core::foc::FocDesired, output_allowed: bool) {
+    fn set_command(&mut self, foc_desired: FocDesired, output_allowed: bool) {
         self.foc_desired = foc_desired;
         self.output_allowed = output_allowed;
     }
@@ -448,7 +448,7 @@ fn main_loop_due(next_main_fast_tick: &mut u32) -> bool {
 }
 
 #[cfg(target_os = "none")]
-fn set_fast_loop_command(foc_desired: obot_core::foc::FocDesired, output_allowed: bool) {
+fn set_fast_loop_command(foc_desired: FocDesired, output_allowed: bool) {
     interrupt_free(|| {
         if let Some(context) = fast_loop_context_mut() {
             context.set_command(foc_desired, output_allowed);

@@ -4,6 +4,11 @@ const TWO_THIRDS: f32 = 2.0 / 3.0;
 const NEG_ONE_THIRD: f32 = -1.0 / 3.0;
 const ONE_OVER_SQRT3: f32 = 0.577_350_26;
 const TWO_PI: f32 = 2.0 * core::f32::consts::PI;
+const MOTOR_HALL_CURRENT_KP: f32 = 7.0;
+const MOTOR_HALL_CURRENT_KI: f32 = 0.5;
+const MOTOR_HALL_CURRENT_KI_LIMIT: f32 = 8.0;
+const MOTOR_HALL_CURRENT_COMMAND_MAX: f32 = 10.0;
+const MOTOR_HALL_CURRENT_FILTER_FREQUENCY_HZ: f32 = 20_000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PiParam {
@@ -24,18 +29,18 @@ pub struct FocParam {
 impl FocParam {
     pub const MOTOR_HALL: Self = Self {
         pi_d: PiParam {
-            kp: 7.0,
-            ki: 0.5,
-            ki_limit: 8.0,
-            command_max: 10.0,
+            kp: MOTOR_HALL_CURRENT_KP,
+            ki: MOTOR_HALL_CURRENT_KI,
+            ki_limit: MOTOR_HALL_CURRENT_KI_LIMIT,
+            command_max: MOTOR_HALL_CURRENT_COMMAND_MAX,
         },
         pi_q: PiParam {
-            kp: 7.0,
-            ki: 0.5,
-            ki_limit: 8.0,
-            command_max: 10.0,
+            kp: MOTOR_HALL_CURRENT_KP,
+            ki: MOTOR_HALL_CURRENT_KI,
+            ki_limit: MOTOR_HALL_CURRENT_KI_LIMIT,
+            command_max: MOTOR_HALL_CURRENT_COMMAND_MAX,
         },
-        current_filter_frequency_hz: 20_000.0,
+        current_filter_frequency_hz: MOTOR_HALL_CURRENT_FILTER_FREQUENCY_HZ,
         num_poles: 7.0,
     };
 }
@@ -70,14 +75,7 @@ impl PiController {
 
     #[inline(always)]
     pub fn step_motor_hall_current(&mut self, desired: f32, measured: f32) -> f32 {
-        const KP: f32 = FocParam::MOTOR_HALL.pi_d.kp;
-        const KI: f32 = FocParam::MOTOR_HALL.pi_d.ki;
-        const KI_LIMIT: f32 = FocParam::MOTOR_HALL.pi_d.ki_limit;
-        const COMMAND_MAX: f32 = FocParam::MOTOR_HALL.pi_d.command_max;
-
-        let error = desired - measured;
-        self.ki_sum = fsat(self.ki_sum + KI * error, KI_LIMIT);
-        fsat(KP * error + self.ki_sum, COMMAND_MAX)
+        motor_hall_current_pi_step(&mut self.ki_sum, desired, measured)
     }
 
     pub const fn ki_sum(self) -> f32 {
@@ -121,8 +119,7 @@ impl FirstOrderLowPassFilter {
             return;
         }
 
-        let numerator = TWO_PI * self.dt * frequency_hz;
-        self.alpha = numerator / (numerator + 1.0);
+        self.alpha = low_pass_alpha(self.dt, frequency_hz);
     }
 
     pub const fn value(self) -> f32 {
@@ -173,6 +170,102 @@ pub struct FocStatus {
     pub desired: FocDesired,
     pub measured: DqCurrents,
     pub command: FocVoltages,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotorHallFocController {
+    pi_d: MotorHallCurrentPiController,
+    pi_q: MotorHallCurrentPiController,
+    id_filter: MotorHallCurrentFilter,
+    iq_filter: MotorHallCurrentFilter,
+}
+
+impl MotorHallFocController {
+    pub fn new(dt: f32) -> Self {
+        Self {
+            pi_d: MotorHallCurrentPiController::new(),
+            pi_q: MotorHallCurrentPiController::new(),
+            id_filter: MotorHallCurrentFilter::new(dt),
+            iq_filter: MotorHallCurrentFilter::new(dt),
+        }
+    }
+
+    #[inline(always)]
+    pub fn initialize(&mut self) {
+        self.pi_d.initialize();
+        self.pi_q.initialize();
+    }
+
+    #[inline(always)]
+    pub fn step_voltage_command_with_sincos(
+        &mut self,
+        desired: FocDesired,
+        currents: PhaseCurrents,
+        sin_t: f32,
+        cos_t: f32,
+    ) -> FocVoltages {
+        let (i_d, i_q) = dq_currents(currents, sin_t, cos_t);
+        let i_d_filtered = self.id_filter.update(i_d);
+        let i_q_filtered = self.iq_filter.update(i_q);
+        let v_d = self.pi_d.step(desired.i_d, i_d_filtered);
+        let v_q = self.pi_q.step(desired.i_q, i_q_filtered) + desired.v_q;
+        voltage_command_from_dq(v_d, v_q, sin_t, cos_t)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MotorHallCurrentPiController {
+    ki_sum: f32,
+}
+
+impl MotorHallCurrentPiController {
+    const fn new() -> Self {
+        Self { ki_sum: 0.0 }
+    }
+
+    #[inline(always)]
+    fn initialize(&mut self) {
+        self.ki_sum = 0.0;
+    }
+
+    #[inline(always)]
+    fn step(&mut self, desired: f32, measured: f32) -> f32 {
+        motor_hall_current_pi_step(&mut self.ki_sum, desired, measured)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MotorHallCurrentFilter {
+    alpha: f32,
+    value: f32,
+}
+
+impl MotorHallCurrentFilter {
+    fn new(dt: f32) -> Self {
+        Self {
+            alpha: low_pass_alpha(dt, MOTOR_HALL_CURRENT_FILTER_FREQUENCY_HZ),
+            value: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn update(&mut self, value: f32) -> f32 {
+        self.value += self.alpha * (value - self.value);
+        self.value
+    }
+}
+
+#[inline(always)]
+fn motor_hall_current_pi_step(ki_sum: &mut f32, desired: f32, measured: f32) -> f32 {
+    let error = desired - measured;
+    *ki_sum = fsat(
+        *ki_sum + MOTOR_HALL_CURRENT_KI * error,
+        MOTOR_HALL_CURRENT_KI_LIMIT,
+    );
+    fsat(
+        MOTOR_HALL_CURRENT_KP * error + *ki_sum,
+        MOTOR_HALL_CURRENT_COMMAND_MAX,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -276,13 +369,7 @@ impl FocController {
         sin_t: f32,
         cos_t: f32,
     ) -> (DqCurrents, f32, f32) {
-        let i_alpha = TWO_THIRDS * currents.phase_a
-            + NEG_ONE_THIRD * currents.phase_b
-            + NEG_ONE_THIRD * currents.phase_c;
-        let i_beta = ONE_OVER_SQRT3 * currents.phase_b - ONE_OVER_SQRT3 * currents.phase_c;
-
-        let i_d = cos_t * i_alpha - sin_t * i_beta;
-        let i_q = sin_t * i_alpha + cos_t * i_beta;
+        let (i_d, i_q) = dq_currents(currents, sin_t, cos_t);
         let i_d_filtered = self.id_filter.update(i_d);
         let i_q_filtered = self.iq_filter.update(i_q);
 
@@ -296,6 +383,24 @@ impl FocController {
             i_q_filtered,
         )
     }
+}
+
+#[inline(always)]
+fn dq_currents(currents: PhaseCurrents, sin_t: f32, cos_t: f32) -> (f32, f32) {
+    let i_alpha = TWO_THIRDS * currents.phase_a
+        + NEG_ONE_THIRD * currents.phase_b
+        + NEG_ONE_THIRD * currents.phase_c;
+    let i_beta = ONE_OVER_SQRT3 * currents.phase_b - ONE_OVER_SQRT3 * currents.phase_c;
+    (
+        cos_t * i_alpha - sin_t * i_beta,
+        sin_t * i_alpha + cos_t * i_beta,
+    )
+}
+
+#[inline(always)]
+fn low_pass_alpha(dt: f32, frequency_hz: f32) -> f32 {
+    let numerator = TWO_PI * dt * frequency_hz;
+    numerator / (numerator + 1.0)
 }
 
 #[inline(always)]
@@ -455,6 +560,34 @@ mod tests {
             0.5,
             0.866_025_4,
         );
+
+        assert_voltages_close(actual, expected);
+    }
+
+    #[test]
+    fn motor_hall_foc_controller_matches_generic_current_mode_step() {
+        let desired = FocDesired {
+            i_d: 0.25,
+            i_q: -0.75,
+            v_q: 0.5,
+        };
+        let currents = PhaseCurrents {
+            phase_a: 0.8,
+            phase_b: -0.3,
+            phase_c: -0.5,
+        };
+        let mut generic = FocController::new(FocParam::MOTOR_HALL, DT_50_KHZ);
+        let mut fixed = MotorHallFocController::new(DT_50_KHZ);
+        generic.current_mode();
+        fixed.initialize();
+
+        let expected = generic.step_current_mode_voltage_command_with_sincos(
+            desired,
+            currents,
+            0.5,
+            0.866_025_4,
+        );
+        let actual = fixed.step_voltage_command_with_sincos(desired, currents, 0.5, 0.866_025_4);
 
         assert_voltages_close(actual, expected);
     }
