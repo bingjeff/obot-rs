@@ -7,6 +7,7 @@ pub mod hall;
 pub mod host;
 pub mod output;
 pub mod power;
+pub mod text_api;
 pub mod timing;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
