@@ -1286,7 +1286,7 @@ struct DebugSnapshot {
     bus_voltage: BusVoltagePacket,
 }
 
-const SNAPSHOT_API_ENTRY_COUNT: usize = 37;
+const SNAPSHOT_API_ENTRY_COUNT: usize = 44;
 
 fn snapshot_api_entries(snapshot: DebugSnapshot) -> [ApiEntry<'static>; SNAPSHOT_API_ENTRY_COUNT] {
     let report = snapshot.benchmark.report;
@@ -1302,6 +1302,22 @@ fn snapshot_api_entries(snapshot: DebugSnapshot) -> [ApiEntry<'static>; SNAPSHOT
         CYCLES_PER_100_US as i64 * 1_000 - combined_mean_milli_cycles as i64;
 
     [
+        ApiEntry::new(
+            "api_length",
+            ApiValue::U16(SNAPSHOT_API_ENTRY_COUNT as u16),
+        ),
+        ApiEntry::new("cpu_frequency", ApiValue::U32(170_000_000)),
+        ApiEntry::new("messages_version", ApiValue::Str("3.3")),
+        ApiEntry::new("t_exec_fastloop", ApiValue::U32(report.t_exec_fastloop())),
+        ApiEntry::new("t_exec_mainloop", ApiValue::U32(report.t_exec_mainloop())),
+        ApiEntry::new(
+            "t_period_fastloop",
+            ApiValue::U32(report.t_period_fastloop()),
+        ),
+        ApiEntry::new(
+            "t_period_mainloop",
+            ApiValue::U32(report.t_period_mainloop()),
+        ),
         ApiEntry::new(
             "max_fast_loop_cycles",
             ApiValue::U32(report.max_fast_loop_cycles()),
@@ -2151,7 +2167,20 @@ mod tests {
 
         assert_eq!(
             catalog.dispatch("api_name=0", &mut response),
+            Ok("api_length")
+        );
+        assert_eq!(catalog.dispatch("api_length", &mut response), Ok("44"));
+        assert_eq!(
+            catalog.dispatch("api_name=7", &mut response),
             Ok("max_fast_loop_cycles")
+        );
+        assert_eq!(
+            catalog.dispatch("t_exec_fastloop", &mut response),
+            Ok("709")
+        );
+        assert_eq!(
+            catalog.dispatch("t_period_mainloop", &mut response),
+            Ok("17000")
         );
         assert_eq!(
             catalog.dispatch("max_fast_loop_cycles", &mut response),
