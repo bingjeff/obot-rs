@@ -1676,6 +1676,17 @@ fn read_usb_run_stats(options: &UsbRunStatsOptions) -> Result<UsbRunStats, Strin
 fn accepted_proof_usb(options: &AcceptedProofUsbOptions) -> Result<String, String> {
     let mut output = String::new();
 
+    let firmware_version = read_text_api_usb(&TextApiUsbOptions {
+        device_path: options.device_path.clone(),
+        request: "firmware_version".to_string(),
+        timeout_ms: options.timeout_ms,
+    })?;
+    append_proof_section(
+        &mut output,
+        "firmware_identity",
+        &format_firmware_identity_csv(DEFAULT_NAME, &firmware_version),
+    );
+
     let driver_result = check_driver_usb(&accepted_proof_driver_options(options))?;
     append_proof_section(
         &mut output,
@@ -1773,6 +1784,14 @@ fn accepted_proof_command_options(
         expectation: CommandCheckExpectation::UnpoweredOutputBlocked,
         leave_command_active: false,
     }
+}
+
+fn format_firmware_identity_csv(name: &str, firmware_version: &str) -> String {
+    format!(
+        "name, firmware_version\n{}, {}\n",
+        name,
+        firmware_version.trim()
+    )
 }
 
 fn append_proof_section(output: &mut String, name: &str, body: &str) {
@@ -4284,6 +4303,14 @@ mod tests {
 
         assert!(output.contains("combined_max, 9995, 9995, 58.79, 58.79, fail"));
         assert!(output.contains("combined_mean, 7100.315, 7100.315, 41.77, 41.77, fail"));
+    }
+
+    #[test]
+    fn formats_firmware_identity_csv() {
+        assert_eq!(
+            format_firmware_identity_csv("rust", "64197f3\n"),
+            "name, firmware_version\nrust, 64197f3\n"
+        );
     }
 
     #[test]

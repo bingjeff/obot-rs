@@ -624,10 +624,14 @@ const CPU_FREQUENCY_HZ: u32 = 170_000_000;
 const MESSAGES_VERSION: &str = "3.3";
 
 #[cfg(target_os = "none")]
+const FIRMWARE_VERSION: &str = env!("OBOT_RS_FIRMWARE_VERSION");
+
+#[cfg(target_os = "none")]
 const TEXT_API_NAMES: &[&str] = &[
     "api_length",
     "cpu_frequency",
     "messages_version",
+    "firmware_version",
     "t_exec_fastloop",
     "t_exec_mainloop",
     "t_period_fastloop",
@@ -753,6 +757,7 @@ fn format_firmware_text_api_value<'out>(
         "api_length" => ApiValue::U16(TEXT_API_NAMES.len() as u16),
         "cpu_frequency" => ApiValue::U32(CPU_FREQUENCY_HZ),
         "messages_version" => ApiValue::Str(MESSAGES_VERSION),
+        "firmware_version" => ApiValue::Str(FIRMWARE_VERSION),
         "t_exec_fastloop" => ApiValue::U32(benchmark_report.t_exec_fastloop()),
         "t_exec_mainloop" => ApiValue::U32(benchmark_report.t_exec_mainloop()),
         "t_period_fastloop" => ApiValue::U32(benchmark_report.t_period_fastloop()),

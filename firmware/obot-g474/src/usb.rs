@@ -114,6 +114,7 @@ const NO_PENDING_ADDRESS: u8 = 0xFF;
 
 const CONFIGURATION_STRING: &str = "obot-rs rust firmware";
 const INTERFACE_STRING: &str = "rust_debug";
+const FIRMWARE_VERSION: &str = env!("OBOT_RS_FIRMWARE_VERSION");
 
 static USB_LP_INTERRUPT_COUNT: AtomicU32 = AtomicU32::new(0);
 static USB_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -522,6 +523,7 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "api_name",
     "cpu_frequency",
     "messages_version",
+    "firmware_version",
     "benchmark_sample",
     "t_exec_fastloop",
     "t_period_fastloop",
@@ -593,6 +595,7 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
     match request {
         b"cpu_frequency" => write_u32_decimal(170_000_000, output),
         b"messages_version" => write_bytes(b"3.3", output),
+        b"firmware_version" => write_bytes(FIRMWARE_VERSION.as_bytes(), output),
         b"benchmark_sample" => write_benchmark_sample(output),
         b"t_exec_fastloop" => {
             write_u32_decimal(BENCH_T_EXEC_FASTLOOP.load(Ordering::Relaxed), output)
@@ -1102,9 +1105,16 @@ mod tests {
 
         let mut output = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
         let len = format_text_api_response(b"api_length", &mut output).unwrap();
-        assert_eq!(&output[..len], b"25");
+        assert_eq!(
+            &output[..len],
+            USB_TEXT_API_NAMES.len().to_string().as_bytes()
+        );
 
         let len = format_text_api_response(b"api_name=4", &mut output).unwrap();
+        assert_eq!(&output[..len], b"firmware_version");
+        let len = format_text_api_response(b"firmware_version", &mut output).unwrap();
+        assert_eq!(&output[..len], FIRMWARE_VERSION.as_bytes());
+        let len = format_text_api_response(b"api_name=5", &mut output).unwrap();
         assert_eq!(&output[..len], b"t_exec_fastloop");
 
         let len = format_text_api_response(b"t_exec_fastloop", &mut output).unwrap();
