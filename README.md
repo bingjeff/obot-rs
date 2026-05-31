@@ -35,4 +35,4 @@ cargo check -p obot-g474 --target thumbv7em-none-eabihf
 
 ## License
 
-This repository follows `obot-controller` and uses the Unlicense. See `UNLICENSE.txt` and `LICENSE-subcomponents.txt`.
+This repository follows `obot-controller` and uses the Unlicense. See `UNLICENSE.txt`.
