@@ -120,6 +120,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "run-stats-usb" => run_stats_usb_command(rest),
         "compare-baseline-usb" => compare_baseline_usb_command(rest),
         "accepted-proof-usb" => accepted_proof_usb_command(rest),
+        "powered-ready-proof-usb" => powered_ready_proof_usb_command(rest),
         "verify-no-heap" => verify_no_heap_command(rest),
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
@@ -281,6 +282,11 @@ fn compare_baseline_usb_command(args: &[String]) -> Result<String, String> {
 fn accepted_proof_usb_command(args: &[String]) -> Result<String, String> {
     let options = AcceptedProofUsbOptions::parse(args)?;
     accepted_proof_usb(&options)
+}
+
+fn powered_ready_proof_usb_command(args: &[String]) -> Result<String, String> {
+    let options = PoweredReadyProofUsbOptions::parse(args)?;
+    powered_ready_proof_usb(&options)
 }
 
 fn read_text_api_usb_command(args: &[String]) -> Result<String, String> {
@@ -973,6 +979,17 @@ struct AcceptedProofUsbOptions {
     reset_settle_ms: u32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct PoweredReadyProofUsbOptions {
+    device_path: Option<PathBuf>,
+    expected_firmware_version: Option<String>,
+    sequence: u8,
+    timeout_ms: u32,
+    poll_timeout_ms: u32,
+    poll_interval_ms: u32,
+    reset_settle_ms: u32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct UsbRunStats {
     max_fast_loop_cycles: u32,
@@ -1280,6 +1297,74 @@ impl AcceptedProofUsbOptions {
         if options.driver_poll_interval_ms == 0 {
             return Err("--driver-poll-interval-ms must be nonzero".to_string());
         }
+        Ok(options)
+    }
+}
+
+impl PoweredReadyProofUsbOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            device_path: None,
+            expected_firmware_version: None,
+            sequence: 1,
+            timeout_ms: DEFAULT_USB_TIMEOUT_MS,
+            poll_timeout_ms: DEFAULT_USB_DRIVER_CHECK_TIMEOUT_MS,
+            poll_interval_ms: DEFAULT_USB_DRIVER_CHECK_POLL_MS,
+            reset_settle_ms: DEFAULT_USB_DRIVER_CHECK_RESET_MS,
+        };
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--dev" | "--device-path" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--dev requires a value".to_string())?;
+                    options.device_path = Some(PathBuf::from(path));
+                }
+                "--sequence" => {
+                    index += 1;
+                    let sequence = parse_u32_arg(args.get(index), "--sequence")?;
+                    options.sequence = sequence
+                        .try_into()
+                        .map_err(|_| "--sequence must fit in u8".to_string())?;
+                }
+                "--timeout-ms" => {
+                    index += 1;
+                    options.timeout_ms = parse_u32_arg(args.get(index), "--timeout-ms")?;
+                }
+                "--poll-timeout-ms" => {
+                    index += 1;
+                    options.poll_timeout_ms = parse_u32_arg(args.get(index), "--poll-timeout-ms")?;
+                }
+                "--poll-interval-ms" => {
+                    index += 1;
+                    options.poll_interval_ms = parse_u32_arg(args.get(index), "--poll-interval-ms")?;
+                }
+                "--reset-settle-ms" => {
+                    index += 1;
+                    options.reset_settle_ms = parse_u32_arg(args.get(index), "--reset-settle-ms")?;
+                }
+                "--expect-firmware-version" => {
+                    index += 1;
+                    options.expected_firmware_version = Some(
+                        args.get(index)
+                            .ok_or_else(|| {
+                                "--expect-firmware-version requires a value".to_string()
+                            })?
+                            .to_string(),
+                    );
+                }
+                other => return Err(format!("unknown option `{other}`")),
+            }
+            index += 1;
+        }
+
+        if options.poll_interval_ms == 0 {
+            return Err("--poll-interval-ms must be nonzero".to_string());
+        }
+
         Ok(options)
     }
 }
@@ -1758,6 +1843,54 @@ fn accepted_proof_usb(options: &AcceptedProofUsbOptions) -> Result<String, Strin
             append_proof_section(&mut output, "baseline_comparison", &comparison);
             Err(command_failure(output))
         }
+    }
+}
+
+fn powered_ready_proof_usb(options: &PoweredReadyProofUsbOptions) -> Result<String, String> {
+    let mut output = String::new();
+
+    let firmware_version = read_text_api_usb(&TextApiUsbOptions {
+        device_path: options.device_path.clone(),
+        request: "firmware_version".to_string(),
+        timeout_ms: options.timeout_ms,
+    })?;
+    append_proof_section(
+        &mut output,
+        "firmware_identity",
+        &format_firmware_identity_csv(DEFAULT_NAME, &firmware_version),
+    );
+    if let Some(expected) = &options.expected_firmware_version {
+        if firmware_version.trim() != expected {
+            return Err(command_failure(output));
+        }
+    }
+
+    let driver_result = check_driver_usb(&powered_ready_driver_options(options))?;
+    append_proof_section(
+        &mut output,
+        "driver_powered_ready",
+        &format_usb_driver_check_csv(DEFAULT_NAME, driver_result),
+    );
+    if driver_result.check_passed {
+        Ok(output)
+    } else {
+        Err(command_failure(output))
+    }
+}
+
+fn powered_ready_driver_options(options: &PoweredReadyProofUsbOptions) -> DriverCheckUsbOptions {
+    DriverCheckUsbOptions {
+        command: DriverCommandUsbOptions {
+            device_path: options.device_path.clone(),
+            sequence: options.sequence,
+            command: DriverCommand::ConfigureEnable,
+            timeout_ms: options.timeout_ms,
+        },
+        poll_timeout_ms: options.poll_timeout_ms,
+        poll_interval_ms: options.poll_interval_ms,
+        reset_settle_ms: options.reset_settle_ms,
+        expectation: DriverCheckExpectation::PoweredReady,
+        leave_driver_enabled: false,
     }
 }
 
@@ -3734,6 +3867,7 @@ fn usage() -> String {
   obot-bench-debug run-stats-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
   obot-bench-debug compare-baseline-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
   obot-bench-debug accepted-proof-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--expect-firmware-version VERSION] [--timeout-ms N] [--command-poll-timeout-ms N] [--command-poll-interval-ms N] [--driver-poll-timeout-ms N] [--driver-poll-interval-ms N]
+  obot-bench-debug powered-ready-proof-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--expect-firmware-version VERSION] [--timeout-ms N] [--poll-timeout-ms N] [--poll-interval-ms N]
   obot-bench-debug verify-no-heap [--elf target/thumbv7em-none-eabihf/release/obot-g474]
   obot-bench-debug read-status-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <status-packet-address>] [--speed 4000]
   obot-bench-debug read-driver-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <driver-report-address>] [--speed 4000]
@@ -4387,6 +4521,49 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "--sequence must be 248 or lower for accepted-proof-usb");
+    }
+
+    #[test]
+    fn parses_powered_ready_proof_usb_options() {
+        let options = PoweredReadyProofUsbOptions::parse(&[
+            "--dev".to_string(),
+            "/dev/bus/usb/001/043".to_string(),
+            "--sequence".to_string(),
+            "210".to_string(),
+            "--expect-firmware-version".to_string(),
+            "741ffaf".to_string(),
+            "--timeout-ms".to_string(),
+            "250".to_string(),
+            "--poll-timeout-ms".to_string(),
+            "2000".to_string(),
+            "--poll-interval-ms".to_string(),
+            "25".to_string(),
+            "--reset-settle-ms".to_string(),
+            "75".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            options.device_path,
+            Some(PathBuf::from("/dev/bus/usb/001/043"))
+        );
+        assert_eq!(options.sequence, 210);
+        assert_eq!(options.expected_firmware_version, Some("741ffaf".to_string()));
+        assert_eq!(options.timeout_ms, 250);
+        assert_eq!(options.poll_timeout_ms, 2000);
+        assert_eq!(options.poll_interval_ms, 25);
+        assert_eq!(options.reset_settle_ms, 75);
+    }
+
+    #[test]
+    fn rejects_zero_powered_ready_proof_poll_interval() {
+        let error = PoweredReadyProofUsbOptions::parse(&[
+            "--poll-interval-ms".to_string(),
+            "0".to_string(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(error, "--poll-interval-ms must be nonzero");
     }
 
     #[test]
