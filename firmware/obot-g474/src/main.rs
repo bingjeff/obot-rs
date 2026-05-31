@@ -86,6 +86,7 @@ fn firmware_main() -> ! {
     };
     let current_calibration = CurrentCalibration::MOTOR_HALL;
     let output_gate = OutputGate::MOTOR_HALL;
+    let mut bus_voltage_raw = 0_u16;
     let hall_angle = HallElectricalAngle::MOTOR_HALL;
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
     foc.current_mode();
@@ -110,16 +111,18 @@ fn firmware_main() -> ! {
                 };
                 let foc_status =
                     foc.step_with_sincos(&foc_command, hall_sincos.sin, hall_sincos.cos);
+                let output_allowed = output_gate.allows_output_raw(bus_voltage_raw);
                 let pwm_compares = pwm.compares_from_voltages(foc_status.command);
                 core::hint::black_box(foc_status);
                 core::hint::black_box(pwm_compares);
+                core::hint::black_box(output_allowed);
                 core::hint::black_box(controller.state());
             });
         }
 
         if poll.main {
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
-                monitor_bus_voltage(&current_adc, output_gate);
+                bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
                 core::hint::black_box(controller.state());
             });
             benchmark_sequence = publish_benchmark_report(
@@ -136,10 +139,11 @@ fn firmware_main() -> ! {
 
 #[cfg(target_os = "none")]
 #[inline(never)]
-fn monitor_bus_voltage(current_adc: &CurrentAdc, output_gate: OutputGate) {
+fn monitor_bus_voltage(current_adc: &CurrentAdc, output_gate: OutputGate) -> u16 {
     let bus_voltage_raw = current_adc.read_bus_voltage_raw();
     let output_allowed = output_gate.allows_output_raw(bus_voltage_raw);
     core::hint::black_box((bus_voltage_raw, output_allowed));
+    bus_voltage_raw
 }
 
 #[cfg(target_os = "none")]
