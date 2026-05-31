@@ -818,3 +818,71 @@ Current comparison:
 
 The command/status channel keeps the extra work in the 10 kHz main-loop path. The Rust fast-loop mean remains below the recorded C++ no-voltage `motor_hall` fast-loop mean (`424.798` cycles Rust versus `708.965` cycles C++), and the combined mean remains below C++ (`17.63%` versus `41.77%`). The firmware is still not feature-equivalent: HRTIM compares are not applied, bridge outputs remain disabled, DRV8323S SPI setup/status is absent, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
 
+
+## 2026-05-31: DRV8323S SPI Status Surface, J-Link Debug Readout
+
+Change under test:
+
+- Added `firmware/obot-g474/src/drv8323s.rs` for the active `motor_hall` DRV8323S SPI pins: PA4 NSS, PA5 SCK, PA6 MISO with pull-up, and PA7 MOSI.
+- Configures SPI1 for the same broad transaction shape as the C++ driver: master, 16-bit TI mode, baud prescaler `/64`.
+- Adds bounded transfer timeouts and a startup-only status probe for DRV8323S registers 0 and 1.
+- Keeps PC13 driver enable low and HRTIM bridge outputs disabled.
+- The DRV startup path is marked cold/noinline so the one-shot SPI path does not perturb the measured 50 kHz hot loop.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink --address 0x20000020
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-command-jlink --packet-address 0x20000071 --sequence-address 0x2000008e --sequence 9 --mode torque --torque 1.25
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-status-jlink --address 0x2000007f
+```
+
+Release artifact sizes:
+
+```text
+137052 target/thumbv7em-none-eabihf/release/obot-g474
+ 15296 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+`arm-none-eabi-size`:
+
+```text
+   text   data    bss    dec    hex filename
+  15232     32    116  15380   3c14 target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+Representative benchmark readouts after flashing:
+
+```text
+rust_debug, 903, 3725, 865, 17009, 410.579, 3399.701, 864.892, 16985.346
+rust_debug, 903, 4118, 1334, 17010, 410.289, 3399.879, 865.585, 16993.859
+```
+
+Command/status verification after this firmware change:
+
+```text
+name, sequence, fault, torque_nm, velocity_rad_s, position_rad
+rust_debug, 63, none, 1.25, 0, 0
+```
+
+Interpretation at 170 MHz using the final readout:
+
+- Fast-loop mean execution: `410.289 cycles = 2.413 us`.
+- Main-loop mean execution: `865.585 cycles = 5.091 us`.
+- Combined 100 us max load: `(5 * 903 + 1334) / 17000 = 34.41%`.
+- Combined 100 us mean load: `(5 * 410.289 + 865.585) / 17000 = 17.16%`.
+
+Rejected variant:
+
+A periodic DRV status read inside the measured 10 kHz main loop booted and ran, but raised main-loop max to `5579` cycles and combined max to about `59.08%`, slightly above the C++ combined max baseline. Keep periodic DRV polling out of the benchmarked main loop until it is designed as an explicit slower maintenance task or host-triggered operation.
+
+Current comparison:
+
+The Rust path now includes the earlier motor-control subset, output safety gates, J-Link command/status, and a cold startup DRV8323S SPI status surface. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not applied to HRTIM, bridge outputs remain disabled, DRV8323S register programming is not implemented, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
+

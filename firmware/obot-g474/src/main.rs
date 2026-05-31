@@ -36,6 +36,8 @@ use obot_g474::cycle_counter::{CycleCounter, DwtCycleCounter};
 #[cfg(target_os = "none")]
 use obot_g474::driver::MotorDriverPins;
 #[cfg(target_os = "none")]
+use obot_g474::drv8323s::Drv8323s;
+#[cfg(target_os = "none")]
 use obot_g474::hall::HallInputs;
 #[cfg(target_os = "none")]
 use obot_g474::pwm::SafeZeroPwm;
@@ -85,6 +87,7 @@ fn firmware_main() -> ! {
     let cycle_counter = DwtCycleCounter::new();
     cycle_counter.enable();
     let driver = MotorDriverPins::init_motor_hall_disabled();
+    probe_driver_spi_status();
     let pwm = SafeZeroPwm::init_motor_hall();
     let mut hall = HallInputs::init_motor_hall();
     let current_adc = match CurrentAdc::init_motor_hall() {
@@ -185,6 +188,15 @@ fn service_host_debug(command_sequence: &mut u8, status_sequence: u8) -> (bool, 
 }
 
 #[cfg(target_os = "none")]
+#[cfg(target_os = "none")]
+#[cold]
+#[inline(never)]
+fn probe_driver_spi_status() {
+    let driver_spi = Drv8323s::init_motor_hall();
+    let status = driver_spi.read_status();
+    core::hint::black_box(status.map(|status| status.as_u32()));
+}
+
 fn controller_storage_mut() -> &'static mut Controller {
     // SAFETY: The current firmware is single-threaded at this layer: command
     // polling/status publication happen from the main-loop branch only, and no
