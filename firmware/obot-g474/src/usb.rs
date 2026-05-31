@@ -151,6 +151,7 @@ static DRIVER_VERIFY_ERROR_MASK: AtomicU32 = AtomicU32::new(0);
 static DRIVER_TRANSFER_ERROR_MASK: AtomicU32 = AtomicU32::new(0);
 static HRTIM_OUTPUT_DISABLE_STATUS: AtomicU32 = AtomicU32::new(0);
 static HRTIM_BRIDGE_OUTPUT_FLAGS: AtomicU32 = AtomicU32::new(BRIDGE_OUTPUTS_DISABLED_BIT);
+static BRIDGE_PREARM_BLOCKERS: AtomicU32 = AtomicU32::new(BRIDGE_PREARM_NOT_PUBLISHED_BIT);
 static DRIVER_STATUS_BEFORE: AtomicU32 = AtomicU32::new(0);
 static DRIVER_STATUS_AFTER: AtomicU32 = AtomicU32::new(0);
 
@@ -163,6 +164,7 @@ const CONTROLLER_FAULTED_BIT: u32 = 1 << 5;
 const HOST_TIMED_OUT_BIT: u32 = 1 << 6;
 const BRIDGE_OUTPUTS_DISABLED_BIT: u32 = 1 << 0;
 const BRIDGE_OUTPUTS_ENABLED_BIT: u32 = 1 << 1;
+const BRIDGE_PREARM_NOT_PUBLISHED_BIT: u32 = 1 << 31;
 
 pub struct UsbDevice;
 
@@ -284,6 +286,10 @@ pub fn publish_hrtim_output_status(
             | bool_flag(bridge_outputs_enabled, BRIDGE_OUTPUTS_ENABLED_BIT),
         Ordering::Relaxed,
     );
+}
+
+pub fn publish_bridge_prearm_status(blockers: u32) {
+    BRIDGE_PREARM_BLOCKERS.store(blockers, Ordering::Relaxed);
 }
 
 pub fn publish_driver_report(report: Drv8323sConfigReport) {
@@ -510,6 +516,8 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "bridge_output_disable_status",
     "bridge_outputs_disabled",
     "bridge_outputs_enabled",
+    "bridge_prearm_ready",
+    "bridge_prearm_blockers",
     "driver_configured",
     "verify_error_mask",
     "transfer_error_mask",
@@ -590,6 +598,10 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
         }
         b"bridge_outputs_disabled" => write_bool(bridge_outputs_disabled(), output),
         b"bridge_outputs_enabled" => write_bool(bridge_outputs_enabled(), output),
+        b"bridge_prearm_ready" => write_bool(bridge_prearm_ready(), output),
+        b"bridge_prearm_blockers" => {
+            write_u32_decimal(BRIDGE_PREARM_BLOCKERS.load(Ordering::Relaxed), output)
+        }
         b"driver_configured" => write_bool(DRIVER_CONFIGURED.load(Ordering::Relaxed) != 0, output),
         b"verify_error_mask" => {
             write_u32_decimal(DRIVER_VERIFY_ERROR_MASK.load(Ordering::Relaxed), output)
@@ -639,6 +651,10 @@ fn bridge_outputs_disabled() -> bool {
 
 fn bridge_outputs_enabled() -> bool {
     HRTIM_BRIDGE_OUTPUT_FLAGS.load(Ordering::Relaxed) & BRIDGE_OUTPUTS_ENABLED_BIT != 0
+}
+
+fn bridge_prearm_ready() -> bool {
+    BRIDGE_PREARM_BLOCKERS.load(Ordering::Relaxed) == 0
 }
 
 fn parse_decimal_usize(input: &[u8]) -> Option<usize> {

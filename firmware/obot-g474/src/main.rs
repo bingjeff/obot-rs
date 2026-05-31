@@ -53,6 +53,18 @@ use obot_protocol::{
 const FAST_LOOP_DT_S: f32 = 1.0 / 50_000.0;
 #[cfg(target_os = "none")]
 const HOST_COMMAND_TIMEOUT_MAIN_TICKS: u32 = 1_000;
+#[cfg(target_os = "none")]
+const BRIDGE_PREARM_BUS_BLOCKED_BIT: u32 = 1 << 0;
+#[cfg(target_os = "none")]
+const BRIDGE_PREARM_DRIVER_NOT_ENABLED_BIT: u32 = 1 << 1;
+#[cfg(target_os = "none")]
+const BRIDGE_PREARM_DRIVER_FAULT_BIT: u32 = 1 << 2;
+#[cfg(target_os = "none")]
+const BRIDGE_PREARM_CONTROLLER_FAULT_BIT: u32 = 1 << 3;
+#[cfg(target_os = "none")]
+const BRIDGE_PREARM_HOST_TIMED_OUT_BIT: u32 = 1 << 4;
+#[cfg(target_os = "none")]
+const BRIDGE_PREARM_OUTPUT_ALREADY_ENABLED_BIT: u32 = 1 << 5;
 
 const LIMITS: Limits = Limits {
     max_torque_nm: 2.0,
@@ -194,6 +206,9 @@ fn firmware_main() -> ! {
                     bridge_output_status.all_disabled,
                     bridge_output_status.all_enabled,
                 );
+                let bridge_prearm_blockers =
+                    bridge_prearm_blockers(output_safety_status, bridge_output_status);
+                obot_g474::usb::publish_bridge_prearm_status(bridge_prearm_blockers);
                 service_text_api_debug(
                     &mut text_api_request_sequence,
                     last_benchmark_report,
@@ -202,6 +217,7 @@ fn firmware_main() -> ! {
                     output_safety_status,
                     bus_voltage_raw,
                     bridge_output_status,
+                    bridge_prearm_blockers,
                 );
                 core::hint::black_box((host_poll, host_status, controller_state.fault));
             });
@@ -297,6 +313,7 @@ fn service_text_api_debug(
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
     bridge_output_status: BridgeOutputStatus,
+    bridge_prearm_blockers: u32,
 ) {
     let Some(packet) = debug_report::poll_text_api_request(request_sequence) else {
         return;
@@ -314,6 +331,7 @@ fn service_text_api_debug(
                 output_safety_status,
                 bus_voltage_raw,
                 bridge_output_status,
+                bridge_prearm_blockers,
             ) {
                 Ok(response_text) => (TextApiResponseStatus::Ok, response_text.len(), response),
                 Err(error) => (text_api_response_status(error), 0, response),
@@ -390,6 +408,8 @@ const TEXT_API_NAMES: &[&str] = &[
     "bridge_output_disable_status",
     "bridge_outputs_disabled",
     "bridge_outputs_enabled",
+    "bridge_prearm_ready",
+    "bridge_prearm_blockers",
     "driver_configured",
     "verify_error_mask",
     "transfer_error_mask",
@@ -407,6 +427,7 @@ fn dispatch_firmware_text_api<'out>(
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
     bridge_output_status: BridgeOutputStatus,
+    bridge_prearm_blockers: u32,
 ) -> Result<&'out str, ApiDispatchError> {
     match parse_request(request).map_err(ApiDispatchError::Parse)? {
         ApiRequest::Get { name } => format_firmware_text_api_value(
@@ -418,6 +439,7 @@ fn dispatch_firmware_text_api<'out>(
             output_safety_status,
             bus_voltage_raw,
             bridge_output_status,
+            bridge_prearm_blockers,
         ),
         ApiRequest::Set { name, .. } => {
             if firmware_text_api_name_index(name).is_some() {
@@ -452,6 +474,7 @@ fn format_firmware_text_api_value<'out>(
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
     bridge_output_status: BridgeOutputStatus,
+    bridge_prearm_blockers: u32,
 ) -> Result<&'out str, ApiDispatchError> {
     let combined_max_cycles = 5 * benchmark_report.max_fast_loop_cycles() as u64
         + benchmark_report.max_main_loop_cycles() as u64;
@@ -527,6 +550,8 @@ fn format_firmware_text_api_value<'out>(
         "bridge_output_disable_status" => ApiValue::U32(bridge_output_status.disable_status),
         "bridge_outputs_disabled" => ApiValue::Bool(bridge_output_status.all_disabled),
         "bridge_outputs_enabled" => ApiValue::Bool(bridge_output_status.all_enabled),
+        "bridge_prearm_ready" => ApiValue::Bool(bridge_prearm_blockers == 0),
+        "bridge_prearm_blockers" => ApiValue::U32(bridge_prearm_blockers),
         "driver_configured" => ApiValue::Bool(driver_report.configured()),
         "verify_error_mask" => ApiValue::U16(driver_report.verify_error_mask),
         "transfer_error_mask" => ApiValue::U16(driver_report.transfer_error_mask),
@@ -589,6 +614,37 @@ fn milli_percent_milli(numerator_milli_cycles: u64, denominator_cycles: u64) -> 
 #[cfg(target_os = "none")]
 fn bus_voltage_millivolts(raw: u16) -> i64 {
     raw as i64 * 8_000 / OutputGate::MOTOR_HALL.min_raw as i64
+}
+
+#[cfg(target_os = "none")]
+fn bridge_prearm_blockers(
+    output_safety_status: OutputSafetyStatus,
+    bridge_output_status: BridgeOutputStatus,
+) -> u32 {
+    bool_mask(
+        output_safety_status.bus_blocked,
+        BRIDGE_PREARM_BUS_BLOCKED_BIT,
+    ) | bool_mask(
+        output_safety_status.driver_not_enabled,
+        BRIDGE_PREARM_DRIVER_NOT_ENABLED_BIT,
+    ) | bool_mask(
+        output_safety_status.driver_fault_latched,
+        BRIDGE_PREARM_DRIVER_FAULT_BIT,
+    ) | bool_mask(
+        output_safety_status.controller_faulted,
+        BRIDGE_PREARM_CONTROLLER_FAULT_BIT,
+    ) | bool_mask(
+        output_safety_status.host_timed_out,
+        BRIDGE_PREARM_HOST_TIMED_OUT_BIT,
+    ) | bool_mask(
+        bridge_output_status.all_enabled,
+        BRIDGE_PREARM_OUTPUT_ALREADY_ENABLED_BIT,
+    )
+}
+
+#[cfg(target_os = "none")]
+fn bool_mask(value: bool, bit: u32) -> u32 {
+    if value { bit } else { 0 }
 }
 
 #[cfg(target_os = "none")]

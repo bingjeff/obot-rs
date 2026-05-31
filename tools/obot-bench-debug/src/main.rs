@@ -49,7 +49,7 @@ const TEXT_API_RESPONSE_PACKET_SYMBOL: &str = "OBOT_TEXT_API_RESPONSE_PACKET";
 const DEFAULT_USB_TIMEOUT_MS: u32 = 1_000;
 const DEFAULT_USB_DRIVER_CHECK_TIMEOUT_MS: u32 = 5_000;
 const DEFAULT_USB_DRIVER_CHECK_POLL_MS: u32 = 50;
-const DEFAULT_USB_DRIVER_CHECK_RESET_MS: u32 = 100;
+const DEFAULT_USB_DRIVER_CHECK_RESET_MS: u32 = 1_000;
 const USB_REALTIME_INTERFACE: u32 = 0;
 const USB_REALTIME_OUT_ENDPOINT: u32 = 0x02;
 const USB_REALTIME_IN_ENDPOINT: u32 = 0x82;
@@ -812,6 +812,8 @@ struct UsbDriverCheckFields {
     bridge_output_disable_status: u32,
     bridge_outputs_disabled: bool,
     bridge_outputs_enabled: bool,
+    bridge_prearm_ready: bool,
+    bridge_prearm_blockers: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1569,6 +1571,12 @@ fn read_usb_driver_check_fields(
             "bridge_outputs_enabled",
             timeout_ms,
         )?,
+        bridge_prearm_ready: text_api_usb_bool_on_file(&file, "bridge_prearm_ready", timeout_ms)?,
+        bridge_prearm_blockers: text_api_usb_u32_on_file(
+            &file,
+            "bridge_prearm_blockers",
+            timeout_ms,
+        )?,
     })
 }
 
@@ -1598,6 +1606,8 @@ fn driver_check_expectation_passed(
                 && fields.driver_not_enabled
                 && fields.bridge_outputs_disabled
                 && !fields.bridge_outputs_enabled
+                && !fields.bridge_prearm_ready
+                && fields.bridge_prearm_blockers != 0
         }
         DriverCheckExpectation::PoweredReady => {
             report_observed
@@ -1610,6 +1620,8 @@ fn driver_check_expectation_passed(
                 && !fields.driver_not_enabled
                 && fields.bridge_outputs_disabled
                 && !fields.bridge_outputs_enabled
+                && fields.bridge_prearm_ready
+                && fields.bridge_prearm_blockers == 0
         }
     }
 }
@@ -2662,7 +2674,7 @@ fn format_status_csv(name: &str, packet: StatusPacket) -> String {
 fn format_usb_driver_check_csv(name: &str, result: UsbDriverCheckResult) -> String {
     let fields = result.fields;
     format!(
-        "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled\n{}, {}, {}, {}, {}, {}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}, {}, 0x{:04X}, {}, {}\n",
+        "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled, bridge_prearm_ready, bridge_prearm_blockers\n{}, {}, {}, {}, {}, {}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}, {}, 0x{:04X}, {}, {}, {}, 0x{:08X}\n",
         name,
         format_driver_command(result.command),
         result.immediate_status.sequence,
@@ -2682,6 +2694,8 @@ fn format_usb_driver_check_csv(name: &str, result: UsbDriverCheckResult) -> Stri
         fields.bridge_output_disable_status,
         fields.bridge_outputs_disabled,
         fields.bridge_outputs_enabled,
+        fields.bridge_prearm_ready,
+        fields.bridge_prearm_blockers,
     )
 }
 
@@ -3647,6 +3661,8 @@ mod tests {
                     bridge_output_disable_status: 0,
                     bridge_outputs_disabled: true,
                     bridge_outputs_enabled: false,
+                    bridge_prearm_ready: false,
+                    bridge_prearm_blockers: 0x0000_0003,
                 },
                 report_observed: true,
                 expectation: DriverCheckExpectation::UnpoweredFailClosed,
@@ -3656,7 +3672,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled\nrust, configure_enable, 94, none, true, unpowered_fail_closed, true, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2, 0x0000, true, false\n"
+            "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled, bridge_prearm_ready, bridge_prearm_blockers\nrust, configure_enable, 94, none, true, unpowered_fail_closed, true, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2, 0x0000, true, false, false, 0x00000003\n"
         );
     }
 
@@ -3675,6 +3691,8 @@ mod tests {
             bridge_output_disable_status: 0,
             bridge_outputs_disabled: true,
             bridge_outputs_enabled: false,
+            bridge_prearm_ready: false,
+            bridge_prearm_blockers: 0x0000_0003,
         };
         let powered_ready = UsbDriverCheckFields {
             driver_configured: true,
@@ -3689,6 +3707,8 @@ mod tests {
             bridge_output_disable_status: 0,
             bridge_outputs_disabled: true,
             bridge_outputs_enabled: false,
+            bridge_prearm_ready: true,
+            bridge_prearm_blockers: 0,
         };
         let status = StatusPacket {
             sequence: 1,
@@ -3736,6 +3756,8 @@ mod tests {
             bridge_output_disable_status: 0,
             bridge_outputs_disabled: true,
             bridge_outputs_enabled: false,
+            bridge_prearm_ready: false,
+            bridge_prearm_blockers: 0x0000_0003,
         }));
         assert!(usb_driver_report_observed(UsbDriverCheckFields {
             driver_configured: false,
@@ -3750,6 +3772,8 @@ mod tests {
             bridge_output_disable_status: 0,
             bridge_outputs_disabled: true,
             bridge_outputs_enabled: false,
+            bridge_prearm_ready: false,
+            bridge_prearm_blockers: 0x0000_0003,
         }));
     }
 
