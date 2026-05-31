@@ -136,7 +136,7 @@ cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- check-driver-usb 
 
 Only run the `powered-ready` probe after the board is prepared for live VM/bus voltage. First run the accepted unpowered proof for the flashed image. A passing powered-ready row must report `check_passed=true`, `driver_configured=true`, `verify_error_mask=0x0000`, `transfer_error_mask=0x0000`, `bus_blocked=false`, `driver_not_enabled=false`, `bridge_prearm_ready=true`, `bridge_prearm_blockers=0x00000000`, and `bridge_outputs_disabled=true`. The default cleanup should also report `post_disable_sent=true` and `post_disable_driver_not_enabled=true`. Do not use `--leave-driver-enabled` for the first live-voltage readiness check.
 
-The dedicated `powered-ready-proof-usb` command wraps that final gate with the same firmware identity assertion and default cleanup behavior used by the accepted proof. On the current unpowered/no-VM board it should fail closed; on prepared powered hardware it is the first readiness command to run before any bridge-output work:
+The dedicated `powered-ready-proof-usb` command wraps that final gate with the same firmware identity assertion and cleanup requirement used by the accepted proof. It only succeeds when the powered-ready row passes and post-disable cleanup confirms the driver was disabled afterward with matched command/consumed counters. On the current unpowered/no-VM board it should fail closed; on prepared powered hardware it is the first readiness command to run before any bridge-output work:
 
 ```sh
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- powered-ready-proof-usb --expect-firmware-version 741ffaf --sequence 200 --poll-timeout-ms 10000 --poll-interval-ms 100
