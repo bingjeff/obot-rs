@@ -161,7 +161,6 @@ fn firmware_main() -> ! {
     let output_gate = OutputGate::MOTOR_HALL;
     let mut bus_voltage_raw = 0_u16;
     let mut output_allowed = false;
-    let hall_angle = HallElectricalAngle::MOTOR_HALL;
     let mut hall_motion = HallMotionEstimator::new(42.0, -1.0, 10_000.0, 0.005);
     let mut outer_loop =
         MotorHallOuterLoop::new(MotorHallOuterLoopParam::MOTOR_HALL, 1.0 / 10_000.0);
@@ -180,7 +179,6 @@ fn firmware_main() -> ! {
         hall,
         current_adc,
         current_calibration,
-        hall_angle,
         foc,
         foc_desired,
         output_allowed,
@@ -356,7 +354,6 @@ struct FastLoopContext {
     hall: HallInputs,
     current_adc: CurrentAdc,
     current_calibration: CurrentCalibration,
-    hall_angle: HallElectricalAngle,
     hall_count: i32,
     foc: FocController,
     foc_desired: obot_core::foc::FocDesired,
@@ -371,7 +368,6 @@ impl FastLoopContext {
         hall: HallInputs,
         current_adc: CurrentAdc,
         current_calibration: CurrentCalibration,
-        hall_angle: HallElectricalAngle,
         foc: FocController,
         foc_desired: obot_core::foc::FocDesired,
         output_allowed: bool,
@@ -383,7 +379,6 @@ impl FastLoopContext {
             hall,
             current_adc,
             current_calibration,
-            hall_angle,
             hall_count: 0,
             foc,
             foc_desired,
@@ -395,7 +390,7 @@ impl FastLoopContext {
         let sample = self.benchmark.start(self.cycle_counter.now());
         let hall_sample = self.hall.read_sample();
         self.hall_count = hall_sample.count;
-        let hall_sincos = self.hall_angle.sincos_hall_count(hall_sample.hall_count);
+        let hall_sincos = HallElectricalAngle::motor_hall_sincos_hall_count(hall_sample.hall_count);
         let currents = self
             .current_calibration
             .convert(self.current_adc.read_samples());

@@ -54,6 +54,33 @@ impl HallElectricalAngle {
     }
 
     #[inline(always)]
+    pub fn motor_hall_sincos_hall_count(hall_count: u8) -> Sincos {
+        match hall_count {
+            1 => Sincos {
+                sin: -SQRT3_OVER_2,
+                cos: 0.5,
+            },
+            2 => Sincos {
+                sin: -SQRT3_OVER_2,
+                cos: -0.5,
+            },
+            3 => Sincos {
+                sin: 0.0,
+                cos: -1.0,
+            },
+            4 => Sincos {
+                sin: SQRT3_OVER_2,
+                cos: -0.5,
+            },
+            5 => Sincos {
+                sin: SQRT3_OVER_2,
+                cos: 0.5,
+            },
+            _ => Sincos { sin: 0.0, cos: 1.0 },
+        }
+    }
+
+    #[inline(always)]
     fn sincos_sector(self, sector: u8) -> Sincos {
         match sector {
             0 => Sincos { sin: 0.0, cos: 1.0 },
@@ -277,6 +304,12 @@ mod tests {
         assert_close(angle.sincos_hall_count(1).cos, 0.5);
         assert_close(angle.sincos_hall_count(6).sin, 0.0);
         assert_close(angle.sincos_hall_count(6).cos, 1.0);
+        for hall_count in 0..=6 {
+            assert_eq!(
+                super::HallElectricalAngle::motor_hall_sincos_hall_count(hall_count),
+                angle.sincos_hall_count(hall_count)
+            );
+        }
     }
 
     #[test]
