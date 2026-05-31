@@ -759,3 +759,62 @@ Current comparison:
 This Rust path now includes live hall-derived electrical angle, current conversion, FOC transforms, current filtering, PI current control, voltage command generation, candidate PWM compare computation, ADC1 bus-voltage monitoring, driver fault/enable pin sampling, latching output safety state, and a cached fast-loop output gate. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not yet applied to HRTIM, bridge outputs remain disabled, live host commands are absent, DRV8323S SPI register setup/status readback is absent, and full safe-mode/fault behavior is not implemented.
 
 The current Rust fast-loop mean remains below the recorded C++ no-voltage `motor_hall` fast-loop mean (`433.885` cycles Rust versus `708.965` cycles C++), and Rust combined mean load remains below C++ (`15.16%` versus `41.77%`). Rust combined max load is also below C++ (`29.58%` versus `58.79%`), but the Rust max fast-loop sample remains higher than the C++ fast-loop max (`924` cycles Rust versus `710` cycles C++), so max-latency variance remains a tracking item.
+
+
+## 2026-05-31: Host Debug Command/Status Channel, J-Link Debug Readout
+
+Firmware commits:
+
+- `fa04ef0 Add debug command status channel`
+- `c520ef0 Keep controller state out of fast loop`
+- `92cd616 Isolate debug command state from fast loop`
+
+Host helper change under test:
+
+- `write-command-jlink` now emits explicit J-Link `w1` byte writes for the command packet followed by the command sequence byte.
+- This replaced the temporary `loadbin` SRAM writer after live testing showed `loadbin` did not reliably update the running target's command packet, while `w1` did.
+
+Verified commands:
+
+```sh
+cargo test --manifest-path tools/obot-bench-debug/Cargo.toml
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-command-jlink --packet-address 0x20000071 --sequence-address 0x2000008e --sequence 8 --mode torque --torque 1.5
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-status-jlink --address 0x2000007f
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink --address 0x20000020
+```
+
+Current exported packet addresses for firmware commit `92cd616`:
+
+```text
+OBOT_BENCHMARK_PACKET          0x20000020
+OBOT_COMMAND_PACKET            0x20000071
+OBOT_STATUS_PACKET             0x2000007f
+OBOT_COMMAND_PACKET_SEQUENCE   0x2000008e
+```
+
+Live command/status result:
+
+```text
+name, sequence, fault, torque_nm, velocity_rad_s, position_rad
+rust_debug, 94, none, 1.5, 0, 0
+```
+
+Representative benchmark readout after the command/status channel:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 904, 4559, 1336, 17010, 424.798, 3400.004, 873.016, 16999.677
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `424.798 cycles = 2.499 us`.
+- Main-loop mean execution: `873.016 cycles = 5.135 us`.
+- Combined 100 us max load: `(5 * 904 + 1336) / 17000 = 34.45%`.
+- Combined 100 us mean load: `(5 * 424.798 + 873.016) / 17000 = 17.63%`.
+
+Current comparison:
+
+The command/status channel keeps the extra work in the 10 kHz main-loop path. The Rust fast-loop mean remains below the recorded C++ no-voltage `motor_hall` fast-loop mean (`424.798` cycles Rust versus `708.965` cycles C++), and the combined mean remains below C++ (`17.63%` versus `41.77%`). The firmware is still not feature-equivalent: HRTIM compares are not applied, bridge outputs remain disabled, DRV8323S SPI setup/status is absent, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
+

@@ -127,17 +127,8 @@ fn write_command_jlink_command(args: &[String]) -> Result<String, String> {
             position_rad: options.position_rad,
         },
     };
-    let packet_path = write_temp_binary("obot-command-packet", &packet.encode())?;
-    let sequence_path = write_temp_binary("obot-command-sequence", &[options.sequence])?;
-    let script = format!(
-        "device {}\nif SWD\nspeed {}\nconnect\nloadbin {}, 0x{:08X}\nloadbin {}, 0x{:08X}\nexit\n",
-        options.jlink.device,
-        options.jlink.speed_khz,
-        packet_path.display(),
-        options.packet_address,
-        sequence_path.display(),
-        options.sequence_address,
-    );
+    let encoded = packet.encode();
+    let script = jlink_write_command_script(&options, &encoded);
     let script_path = write_temp_script(&script)?;
     let output = Command::new("JLinkExe")
         .arg("-CommanderScript")
@@ -145,8 +136,6 @@ fn write_command_jlink_command(args: &[String]) -> Result<String, String> {
         .output()
         .map_err(|error| format!("failed to run JLinkExe: {error}"));
     let _ = fs::remove_file(&script_path);
-    let _ = fs::remove_file(&packet_path);
-    let _ = fs::remove_file(&sequence_path);
     let output = output?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -357,6 +346,24 @@ fn jlink_read_script(options: &JlinkOptions, len: usize) -> String {
     )
 }
 
+fn jlink_write_command_script(options: &CommandWriteOptions, encoded_packet: &[u8]) -> String {
+    let mut script = format!(
+        "device {}\nif SWD\nspeed {}\nconnect\n",
+        options.jlink.device, options.jlink.speed_khz
+    );
+    for (offset, byte) in encoded_packet.iter().copied().enumerate() {
+        script.push_str(&format!(
+            "w1 0x{:08X}, 0x{byte:02X}\n",
+            options.packet_address + offset as u32
+        ));
+    }
+    script.push_str(&format!(
+        "w1 0x{:08X}, 0x{:02X}\nexit\n",
+        options.sequence_address, options.sequence
+    ));
+    script
+}
+
 fn write_temp_script(script: &str) -> Result<std::path::PathBuf, String> {
     let path = env::temp_dir().join(format!(
         "obot-bench-debug-{}-{}.jlink",
@@ -364,17 +371,6 @@ fn write_temp_script(script: &str) -> Result<std::path::PathBuf, String> {
         monotonic_suffix()
     ));
     fs::write(&path, script).map_err(|error| format!("failed to write {:?}: {error}", path))?;
-    Ok(path)
-}
-
-fn write_temp_binary(prefix: &str, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
-    let path = env::temp_dir().join(format!(
-        "{}-{}-{}.bin",
-        prefix,
-        std::process::id(),
-        monotonic_suffix()
-    ));
-    fs::write(&path, bytes).map_err(|error| format!("failed to write {:?}: {error}", path))?;
     Ok(path)
 }
 
@@ -677,5 +673,40 @@ mod tests {
         assert_eq!(options.sequence, 7);
         assert_eq!(options.mode, ControlMode::Torque);
         assert_eq!(options.torque_nm, 1.5);
+    }
+
+    #[test]
+    fn builds_command_write_script_with_packet_before_sequence() {
+        let options = CommandWriteOptions {
+            jlink: JlinkOptions {
+                address: DEFAULT_ADDRESS,
+                speed_khz: DEFAULT_SPEED_KHZ,
+                device: DEFAULT_DEVICE,
+            },
+            packet_address: 0x2000_0090,
+            sequence_address: 0x2000_009e,
+            sequence: 7,
+            mode: ControlMode::Torque,
+            torque_nm: 1.25,
+            velocity_rad_s: 0.0,
+            position_rad: 0.0,
+        };
+        let packet = CommandPacket {
+            sequence: options.sequence,
+            command: MotorCommand {
+                mode: options.mode,
+                torque_nm: options.torque_nm,
+                velocity_rad_s: options.velocity_rad_s,
+                position_rad: options.position_rad,
+            },
+        };
+
+        let script = jlink_write_command_script(&options, &packet.encode());
+
+        assert!(script.starts_with("device STM32G474RE\nif SWD\nspeed 4000\nconnect\n"));
+        assert!(script.contains("w1 0x20000090, 0x07\n"));
+        assert!(script.contains("w1 0x20000091, 0x01\n"));
+        assert!(script.contains("w1 0x20000094, 0xA0\n"));
+        assert!(script.ends_with("w1 0x2000009E, 0x07\nexit\n"));
     }
 }
