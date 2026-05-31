@@ -134,6 +134,8 @@ cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- check-driver-usb 
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- check-driver-usb --sequence 1 --command configure-enable --expect powered-ready
 ```
 
+Only run the `powered-ready` probe after the board is prepared for live VM/bus voltage. First run the accepted unpowered proof for the flashed image. A passing powered-ready row must report `check_passed=true`, `driver_configured=true`, `verify_error_mask=0x0000`, `transfer_error_mask=0x0000`, `bus_blocked=false`, `driver_not_enabled=false`, `bridge_prearm_ready=true`, `bridge_prearm_blockers=0x00000000`, and `bridge_outputs_disabled=true`. The default cleanup should also report `post_disable_sent=true` and `post_disable_driver_not_enabled=true`. Do not use `--leave-driver-enabled` for the first live-voltage readiness check.
+
 If more than one OBOT controller is attached, pass the exact `/dev/bus/usb` path reported by `lsusb` with `--dev /dev/bus/usb/<bus>/<dev>`. This uses the Rust packet format on endpoint 2. It is intended for Rust firmware bring-up and is not a drop-in replacement for the original C++ realtime host protocol.
 
 Status and driver report reads also resolve packet addresses from the ELF:
