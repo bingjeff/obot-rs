@@ -52,3 +52,56 @@ Interpretation at 170 MHz:
 Comparison caveat:
 
 This is only the Rust timing/reporting shell. It does not yet include equivalent ADC/PWM/sensor/control work from the C++ `motor_hall` firmware, so it is not a final performance comparison. It does prove that the Rust timing shell runs on hardware at the intended 20 us and 100 us periods with substantial available headroom before porting motor-control logic.
+
+
+## 2026-05-31: Safe Zero-PWM HRTIM Surface, J-Link Debug Readout
+
+Firmware commit: `cfdc9ff Add safe zero PWM surface`
+
+Build and flash steps used:
+
+```sh
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+/home/bingjeff/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy \
+  -O binary \
+  target/thumbv7em-none-eabihf/release/obot-g474 \
+  target/thumbv7em-none-eabihf/release/obot-g474.bin
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink
+```
+
+Release artifact sizes:
+
+```text
+132988 target/thumbv7em-none-eabihf/release/obot-g474
+  4500 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+Flash result:
+
+```text
+J-Link: Flash download: Bank 0 @ 0x08000000: 1 range affected (6144 bytes)
+J-Link: Flash download: Program & Verify speed: 72 KB/s
+O.K.
+```
+
+Representative readout after flashing:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 194, 3449, 131, 17007, 96.589, 3399.98, 130.872, 17000.004
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `96.589 cycles = 0.568 us`.
+- Main-loop mean execution: `130.872 cycles = 0.770 us`.
+- Fast-loop mean period: `3399.98 cycles = 20.000 us`.
+- Main-loop mean period: `17000.004 cycles = 100.000 us`.
+- Combined 100 us max safe-zero-PWM load: `(5 * 194 + 131) / 17000 = 6.48%`.
+- Combined 100 us mean safe-zero-PWM load: `(5 * 96.589 + 130.872) / 17000 = 3.61%`.
+- Incremental mean fast-loop cost over the empty shell: `96.589 - 74.596 = 21.993 cycles = 0.129 us`.
+
+Comparison caveat:
+
+This build configures the HRTIM PWM timing surface and writes zero-voltage compare values every fast loop, but it keeps all HRTIM outputs disabled with `ODISR = 0x0FFF`. It still does not include ADC sampling, hall sensor decoding, current control, voltage control, safety/fault handling, or host API parity.
