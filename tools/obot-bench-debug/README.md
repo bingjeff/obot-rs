@@ -75,6 +75,14 @@ To clear a latched controller fault through the debug command packet, use the ex
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-command-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474 --sequence 1 --mode clear-faults
 ```
 
+To send the same Rust-owned command packet over the USB realtime endpoint and read back the endpoint-2 status response, use the current `/dev/bus/usb` path reported by `lsusb`:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-command-usb --dev /dev/bus/usb/001/043 --sequence 1 --mode disabled
+```
+
+This uses the Rust packet format on endpoint 2. It is intended for Rust firmware bring-up and is not a drop-in replacement for the original C++ realtime host protocol.
+
 
 Status and driver report reads also resolve packet addresses from the ELF:
 

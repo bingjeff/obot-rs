@@ -12,7 +12,7 @@ obot-protocol = { path = "../../crates/obot-protocol" }
 
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "allow"
 
 [lints.clippy]
 alloc_instead_of_core = "allow"

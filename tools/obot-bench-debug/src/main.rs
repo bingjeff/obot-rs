@@ -1,5 +1,9 @@
 use std::{
     env, fs, io,
+    os::{
+        fd::AsRawFd,
+        raw::{c_int, c_ulong, c_void},
+    },
     path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
@@ -10,10 +14,10 @@ use obot_core::{
     text_api::{ApiCatalog, ApiDispatchError, ApiEntry, ApiValue},
 };
 use obot_protocol::{
-    BENCHMARK_PACKET_LEN, BUS_VOLTAGE_PACKET_LEN, BenchmarkPacket, BusVoltagePacket,
-    CommandPacket, DRIVER_REPORT_PACKET_LEN, DriverCommand, DriverCommandPacket,
-    DriverReportPacket, OUTPUT_SAFETY_PACKET_LEN, OutputSafetyPacket, STATUS_PACKET_LEN,
-    StatusPacket, TEXT_API_RESPONSE_PACKET_LEN, TextApiRequestPacket, TextApiResponsePacket,
+    BENCHMARK_PACKET_LEN, BUS_VOLTAGE_PACKET_LEN, BenchmarkPacket, BusVoltagePacket, CommandPacket,
+    DRIVER_REPORT_PACKET_LEN, DriverCommand, DriverCommandPacket, DriverReportPacket,
+    OUTPUT_SAFETY_PACKET_LEN, OutputSafetyPacket, STATUS_PACKET_LEN, StatusPacket,
+    TEXT_API_RESPONSE_PACKET_LEN, TextApiRequestPacket, TextApiResponsePacket,
     TextApiResponseStatus,
 };
 
@@ -36,6 +40,13 @@ const STATUS_PACKET_SYMBOL: &str = "OBOT_STATUS_PACKET";
 const TEXT_API_REQUEST_PACKET_SYMBOL: &str = "OBOT_TEXT_API_REQUEST_PACKET";
 const TEXT_API_REQUEST_SEQUENCE_SYMBOL: &str = "OBOT_TEXT_API_REQUEST_PACKET_SEQUENCE";
 const TEXT_API_RESPONSE_PACKET_SYMBOL: &str = "OBOT_TEXT_API_RESPONSE_PACKET";
+const DEFAULT_USB_TIMEOUT_MS: u32 = 1_000;
+const USB_REALTIME_INTERFACE: u32 = 0;
+const USB_REALTIME_OUT_ENDPOINT: u32 = 0x02;
+const USB_REALTIME_IN_ENDPOINT: u32 = 0x82;
+const USBDEVFS_BULK: c_ulong = 0xC018_5502;
+const USBDEVFS_CLAIMINTERFACE: c_ulong = 0x8004_550F;
+const USBDEVFS_RELEASEINTERFACE: c_ulong = 0x8004_5510;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -78,6 +89,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "read-text-api-response-jlink" => read_text_api_response_jlink_command(rest),
         "write-text-api-request-jlink" => write_text_api_request_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
+        "write-command-usb" => write_command_usb_command(rest),
         "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
         "jlink-script" => jlink_script_command(rest),
         "--help" | "-h" | "help" => Ok(usage()),
@@ -229,7 +241,9 @@ fn read_text_api_response_jlink_command(args: &[String]) -> Result<String, Strin
 fn snapshot_jlink_command(args: &[String]) -> Result<String, String> {
     let options = SymbolReadOptions::parse(args)?;
     if options.address.is_some() {
-        return Err("snapshot-jlink reads multiple symbols; use --elf instead of --address".to_string());
+        return Err(
+            "snapshot-jlink reads multiple symbols; use --elf instead of --address".to_string(),
+        );
     }
 
     Ok(format_snapshot_csv(
@@ -359,6 +373,21 @@ fn write_command_jlink_command(args: &[String]) -> Result<String, String> {
         "wrote command sequence {} mode {:?}\n",
         options.sequence, options.mode
     ))
+}
+
+fn write_command_usb_command(args: &[String]) -> Result<String, String> {
+    let options = RealtimeUsbOptions::parse(args)?;
+    let packet = CommandPacket {
+        sequence: options.sequence,
+        command: MotorCommand {
+            mode: options.mode,
+            torque_nm: options.torque_nm,
+            velocity_rad_s: options.velocity_rad_s,
+            position_rad: options.position_rad,
+        },
+    };
+    let status = transact_realtime_usb(&options, packet)?;
+    Ok(format_status_csv(DEFAULT_NAME, status))
 }
 
 fn write_driver_command_jlink_command(args: &[String]) -> Result<String, String> {
@@ -620,6 +649,34 @@ impl SymbolReadOptions {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct RealtimeUsbOptions {
+    device_path: PathBuf,
+    sequence: u8,
+    mode: ControlMode,
+    torque_nm: f32,
+    velocity_rad_s: f32,
+    position_rad: f32,
+    timeout_ms: u32,
+}
+
+#[repr(C)]
+struct UsbdevfsBulkTransfer {
+    ep: u32,
+    len: u32,
+    timeout: u32,
+    data: *mut c_void,
+}
+
+struct UsbInterfaceClaim<'file> {
+    file: &'file fs::File,
+    interface: u32,
+}
+
+unsafe extern "C" {
+    fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct CommandWriteOptions {
     jlink: JlinkOptions,
     packet_address: Option<u32>,
@@ -682,6 +739,171 @@ struct ResolvedTextApiRequestWriteOptions {
     request: String,
 }
 
+impl RealtimeUsbOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            device_path: PathBuf::new(),
+            sequence: 1,
+            mode: ControlMode::Disabled,
+            torque_nm: 0.0,
+            velocity_rad_s: 0.0,
+            position_rad: 0.0,
+            timeout_ms: DEFAULT_USB_TIMEOUT_MS,
+        };
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--dev" | "--device-path" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--dev requires a value".to_string())?;
+                    options.device_path = PathBuf::from(path);
+                }
+                "--sequence" => {
+                    index += 1;
+                    let sequence = parse_u32_arg(args.get(index), "--sequence")?;
+                    options.sequence = sequence
+                        .try_into()
+                        .map_err(|_| "--sequence must fit in u8".to_string())?;
+                }
+                "--mode" => {
+                    index += 1;
+                    let mode = args
+                        .get(index)
+                        .ok_or_else(|| "--mode requires a value".to_string())?;
+                    options.mode = parse_control_mode(mode)?;
+                }
+                "--torque" => {
+                    index += 1;
+                    options.torque_nm = parse_f32_arg(args.get(index), "--torque")?;
+                }
+                "--velocity" => {
+                    index += 1;
+                    options.velocity_rad_s = parse_f32_arg(args.get(index), "--velocity")?;
+                }
+                "--position" => {
+                    index += 1;
+                    options.position_rad = parse_f32_arg(args.get(index), "--position")?;
+                }
+                "--timeout-ms" => {
+                    index += 1;
+                    options.timeout_ms = parse_u32_arg(args.get(index), "--timeout-ms")?;
+                }
+                other => return Err(format!("unknown option `{other}`")),
+            }
+            index += 1;
+        }
+
+        if options.device_path.as_os_str().is_empty() {
+            return Err("write-command-usb requires --dev /dev/bus/usb/<bus>/<dev>".to_string());
+        }
+
+        Ok(options)
+    }
+}
+
+impl Drop for UsbInterfaceClaim<'_> {
+    fn drop(&mut self) {
+        let mut interface = self.interface;
+        let _ = unsafe {
+            ioctl(
+                self.file.as_raw_fd(),
+                USBDEVFS_RELEASEINTERFACE,
+                &mut interface,
+            )
+        };
+    }
+}
+
+fn transact_realtime_usb(
+    options: &RealtimeUsbOptions,
+    packet: CommandPacket,
+) -> Result<StatusPacket, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&options.device_path)
+        .map_err(|error| {
+            format!(
+                "failed to open `{}`: {error}",
+                options.device_path.display()
+            )
+        })?;
+    let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
+
+    let mut command = packet.encode();
+    let written = usbfs_bulk_transfer(
+        &file,
+        USB_REALTIME_OUT_ENDPOINT,
+        &mut command,
+        options.timeout_ms,
+    )?;
+    if written != command.len() {
+        return Err(format!(
+            "short realtime command write: wrote {written} of {} bytes",
+            command.len()
+        ));
+    }
+
+    let mut response = [0; STATUS_PACKET_LEN];
+    let read = usbfs_bulk_transfer(
+        &file,
+        USB_REALTIME_IN_ENDPOINT,
+        &mut response,
+        options.timeout_ms,
+    )?;
+    if read != STATUS_PACKET_LEN {
+        return Err(format!(
+            "short realtime status read: read {read} of {STATUS_PACKET_LEN} bytes"
+        ));
+    }
+
+    StatusPacket::decode(&response).map_err(|error| format!("status decode failed: {error:?}"))
+}
+
+fn claim_usb_interface(file: &fs::File, interface: u32) -> Result<UsbInterfaceClaim<'_>, String> {
+    let mut value = interface;
+    let result = unsafe { ioctl(file.as_raw_fd(), USBDEVFS_CLAIMINTERFACE, &mut value) };
+    if result < 0 {
+        return Err(format!(
+            "failed to claim USB interface {interface}: {}",
+            io::Error::last_os_error()
+        ));
+    }
+
+    Ok(UsbInterfaceClaim { file, interface })
+}
+
+fn usbfs_bulk_transfer(
+    file: &fs::File,
+    endpoint: u32,
+    data: &mut [u8],
+    timeout_ms: u32,
+) -> Result<usize, String> {
+    let len: u32 = data
+        .len()
+        .try_into()
+        .map_err(|_| "USB transfer length does not fit in u32".to_string())?;
+    let mut transfer = UsbdevfsBulkTransfer {
+        ep: endpoint,
+        len,
+        timeout: timeout_ms,
+        data: data.as_mut_ptr().cast(),
+    };
+
+    let result = unsafe { ioctl(file.as_raw_fd(), USBDEVFS_BULK, &mut transfer) };
+    if result < 0 {
+        return Err(format!(
+            "USB bulk transfer on endpoint 0x{endpoint:02X} failed: {}",
+            io::Error::last_os_error()
+        ));
+    }
+
+    Ok(result as usize)
+}
+
 impl TextApiRequestWriteOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
@@ -703,7 +925,8 @@ impl TextApiRequestWriteOptions {
             match args[index].as_str() {
                 "--packet-address" => {
                     index += 1;
-                    options.packet_address = Some(parse_u32_arg(args.get(index), "--packet-address")?);
+                    options.packet_address =
+                        Some(parse_u32_arg(args.get(index), "--packet-address")?);
                 }
                 "--sequence-address" => {
                     index += 1;
@@ -796,7 +1019,8 @@ impl DriverCommandWriteOptions {
             match args[index].as_str() {
                 "--packet-address" => {
                     index += 1;
-                    options.packet_address = Some(parse_u32_arg(args.get(index), "--packet-address")?);
+                    options.packet_address =
+                        Some(parse_u32_arg(args.get(index), "--packet-address")?);
                 }
                 "--sequence-address" => {
                     index += 1;
@@ -892,7 +1116,8 @@ impl CommandWriteOptions {
             match args[index].as_str() {
                 "--packet-address" => {
                     index += 1;
-                    options.packet_address = Some(parse_u32_arg(args.get(index), "--packet-address")?);
+                    options.packet_address =
+                        Some(parse_u32_arg(args.get(index), "--packet-address")?);
                 }
                 "--sequence-address" => {
                     index += 1;
@@ -1092,16 +1317,18 @@ fn find_rust_tool(name: &str) -> Result<PathBuf, String> {
     let entries = fs::read_dir(&rustlib)
         .map_err(|error| format!("failed to read `{}`: {error}", rustlib.display()))?;
     for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!("failed to inspect `{}` entry: {error}", rustlib.display())
-        })?;
+        let entry = entry
+            .map_err(|error| format!("failed to inspect `{}` entry: {error}", rustlib.display()))?;
         let candidate = entry.path().join("bin").join(name);
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
 
-    Err(format!("could not find `{name}` under `{}`", rustlib.display()))
+    Err(format!(
+        "could not find `{name}` under `{}`",
+        rustlib.display()
+    ))
 }
 
 fn parse_nm_symbol_address(output: &str, symbol: &str) -> Option<u32> {
@@ -1132,7 +1359,10 @@ fn jlink_read_script(options: &JlinkOptions, len: usize) -> String {
     )
 }
 
-fn jlink_write_command_script(options: &ResolvedCommandWriteOptions, encoded_packet: &[u8]) -> String {
+fn jlink_write_command_script(
+    options: &ResolvedCommandWriteOptions,
+    encoded_packet: &[u8],
+) -> String {
     jlink_write_raw_packet_script(
         &options.jlink,
         options.packet_address,
@@ -1302,10 +1532,7 @@ fn snapshot_api_entries(snapshot: DebugSnapshot) -> [ApiEntry<'static>; SNAPSHOT
         CYCLES_PER_100_US as i64 * 1_000 - combined_mean_milli_cycles as i64;
 
     [
-        ApiEntry::new(
-            "api_length",
-            ApiValue::U16(SNAPSHOT_API_ENTRY_COUNT as u16),
-        ),
+        ApiEntry::new("api_length", ApiValue::U16(SNAPSHOT_API_ENTRY_COUNT as u16)),
         ApiEntry::new("cpu_frequency", ApiValue::U32(170_000_000)),
         ApiEntry::new("messages_version", ApiValue::Str("3.3")),
         ApiEntry::new("t_exec_fastloop", ApiValue::U32(report.t_exec_fastloop())),
@@ -1413,13 +1640,19 @@ fn snapshot_api_entries(snapshot: DebugSnapshot) -> [ApiEntry<'static>; SNAPSHOT
                 combined_mean_remaining_milli_cycles,
             )),
         ),
-        ApiEntry::new("fault", ApiValue::Str(format_fault(snapshot.status.state.fault))),
+        ApiEntry::new(
+            "fault",
+            ApiValue::Str(format_fault(snapshot.status.state.fault)),
+        ),
         ApiEntry::new("torque_nm", ApiValue::F32(snapshot.status.state.torque_nm)),
         ApiEntry::new(
             "velocity_rad_s",
             ApiValue::F32(snapshot.status.state.velocity_rad_s),
         ),
-        ApiEntry::new("position_rad", ApiValue::F32(snapshot.status.state.position_rad)),
+        ApiEntry::new(
+            "position_rad",
+            ApiValue::F32(snapshot.status.state.position_rad),
+        ),
         ApiEntry::new("output_allowed", ApiValue::Bool(status.output_allowed)),
         ApiEntry::new("command_blocked", ApiValue::Bool(status.command_blocked)),
         ApiEntry::new("bus_blocked", ApiValue::Bool(status.bus_blocked)),
@@ -1439,7 +1672,10 @@ fn snapshot_api_entries(snapshot: DebugSnapshot) -> [ApiEntry<'static>; SNAPSHOT
         ApiEntry::new("bus_voltage_raw", ApiValue::U16(snapshot.bus_voltage.raw)),
         ApiEntry::new("bus_voltage_volts", ApiValue::F32(bus_sample.volts)),
         ApiEntry::new("bus_allows_output", ApiValue::Bool(bus_allows_output)),
-        ApiEntry::new("driver_configured", ApiValue::Bool(snapshot.driver.configured)),
+        ApiEntry::new(
+            "driver_configured",
+            ApiValue::Bool(snapshot.driver.configured),
+        ),
         ApiEntry::new(
             "verify_error_mask",
             ApiValue::U16(snapshot.driver.verify_error_mask),
@@ -1448,7 +1684,10 @@ fn snapshot_api_entries(snapshot: DebugSnapshot) -> [ApiEntry<'static>; SNAPSHOT
             "transfer_error_mask",
             ApiValue::U16(snapshot.driver.transfer_error_mask),
         ),
-        ApiEntry::new("status_before", ApiValue::U32(snapshot.driver.status_before)),
+        ApiEntry::new(
+            "status_before",
+            ApiValue::U32(snapshot.driver.status_before),
+        ),
         ApiEntry::new("status_after", ApiValue::U32(snapshot.driver.status_after)),
     ]
 }
@@ -1816,6 +2055,7 @@ fn usage() -> String {
   obot-bench-debug write-text-api-request-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <text-api-request-address>] [--sequence-address <text-api-request-sequence-address>] [--sequence N] <api-request>
   obot-bench-debug read-text-api-response-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <text-api-response-address>] [--speed 4000]
   obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
+  obot-bench-debug write-command-usb --dev /dev/bus/usb/<bus>/<dev> [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad] [--timeout-ms N]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
 ",
         BENCHMARK_PACKET_LEN,
@@ -2186,10 +2426,7 @@ mod tests {
             catalog.dispatch("max_fast_loop_cycles", &mut response),
             Ok("710")
         );
-        assert_eq!(
-            catalog.dispatch("fault", &mut response),
-            Ok("torque_limit")
-        );
+        assert_eq!(catalog.dispatch("fault", &mut response), Ok("torque_limit"));
         assert_eq!(
             catalog.dispatch("bus_allows_output", &mut response),
             Ok("true")
@@ -2218,11 +2455,8 @@ mod tests {
 
     #[test]
     fn snapshot_jlink_rejects_single_address_override() {
-        let error = snapshot_jlink_command(&[
-            "--address".to_string(),
-            "0x20000020".to_string(),
-        ])
-        .unwrap_err();
+        let error = snapshot_jlink_command(&["--address".to_string(), "0x20000020".to_string()])
+            .unwrap_err();
 
         assert!(error.contains("reads multiple symbols"));
     }
@@ -2264,6 +2498,36 @@ mod tests {
         assert_eq!(options.sequence_address, Some(0x2000_00d2));
         assert_eq!(options.sequence, 9);
         assert_eq!(options.request, "mean_fast_loop_cycles");
+    }
+
+    #[test]
+    fn parses_realtime_usb_options() {
+        let options = RealtimeUsbOptions::parse(&[
+            "--dev".to_string(),
+            "/dev/bus/usb/001/043".to_string(),
+            "--sequence".to_string(),
+            "77".to_string(),
+            "--mode".to_string(),
+            "velocity".to_string(),
+            "--velocity".to_string(),
+            "3.5".to_string(),
+            "--timeout-ms".to_string(),
+            "250".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.device_path, PathBuf::from("/dev/bus/usb/001/043"));
+        assert_eq!(options.sequence, 77);
+        assert_eq!(options.mode, ControlMode::Velocity);
+        assert_eq!(options.velocity_rad_s, 3.5);
+        assert_eq!(options.timeout_ms, 250);
+    }
+
+    #[test]
+    fn realtime_usb_options_require_device_path() {
+        let error = RealtimeUsbOptions::parse(&[]).unwrap_err();
+
+        assert!(error.contains("requires --dev"));
     }
 
     #[test]
