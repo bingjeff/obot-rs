@@ -44,6 +44,12 @@ To make the current Rust-vs-C++ performance gate repeatable on hardware, compare
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- compare-baseline-usb 100
 ```
 
+For the accepted unpowered firmware proof, use `accepted-proof-usb`. It reads the board-reported `firmware_version`, checks the driver fail-closed gate, verifies torque/velocity/position commands are observed while outputs stay blocked, collects USB timing stats, and runs the C++ baseline comparison. Pass `--expect-firmware-version` when validating a specific flashed image so the command fails before safety/benchmark checks if the wrong firmware is connected. The current accepted flashed firmware reports `741ffaf`:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- accepted-proof-usb --expect-firmware-version 741ffaf --sequence 200 --samples 100
+```
+
 For one-off USB text API reads, use:
 
 ```sh
