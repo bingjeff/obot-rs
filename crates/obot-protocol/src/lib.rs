@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod usb_control;
+
 use obot_core::{
     ControlMode, Fault, MotorCommand, MotorState,
     benchmark::{BenchmarkReport, CycleStatsSnapshot, LoopBenchmarkSnapshot},
