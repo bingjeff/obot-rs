@@ -1290,3 +1290,67 @@ Interpretation at 170 MHz:
 Current comparison:
 
 The Rust path now includes the earlier motor-control subset, output safety gates, J-Link motor command/status, host-triggered driver command handling, explicit chip-select DRV8323S SPI transactions, DRV8323S register programming/readback reporting, safety-gated HRTIM compare writes, and C++-matching flash acceleration bits. Bridge outputs remain disabled. It is still not feature-equivalent to C++ `motor_hall`: successful DRV8323S configuration requires bus/VM supply that is absent in the current attached hardware state, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
+
+
+## 2026-05-31: Detailed Benchmark Readout Without Firmware Perturbation
+
+Change under test:
+
+- Added `decode-detail-hex`, `decode-detail-file`, and `read-jlink-detail` to `tools/obot-bench-debug`.
+- The detailed mode decodes the existing 81-byte benchmark packet and prints `samples`, `last_cycles`, `max_cycles`, and `mean_cycles` for fast/main period and execution stats.
+- Rejected a firmware-side `max_sample` packet extension after it perturbed the physical benchmark; restored and reflashed the lean firmware before recording the final numbers.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-driver-command-jlink --packet-address 0x2000007f --sequence-address 0x2000009f --sequence 9 --command disable
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink --address 0x20000020
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink-detail --address 0x20000020
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-status-jlink --address 0x2000008f
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-driver-jlink --address 0x20000081
+```
+
+Release artifact sizes after restoring lean firmware:
+
+```text
+137752 target/thumbv7em-none-eabihf/release/obot-g474
+ 16884 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+`arm-none-eabi-size`:
+
+```text
+   text   data    bss    dec    hex filename
+  16852     32    132  17016   4278 target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+Run-stats readout:
+
+```text
+rust_debug, 831, 3979, 1044, 17009, 403.793, 3399.991, 1043.875, 17000
+```
+
+Detailed readout:
+
+```text
+name, sequence, metric, samples, last_cycles, max_cycles, mean_cycles
+rust_debug, 156, fast_period, 2069, 3402, 3979, 3399.988
+rust_debug, 156, fast_execution, 2090, 297, 831, 403.79
+rust_debug, 156, main_period, 421, 17006, 17009, 17000.002
+rust_debug, 156, main_execution, 427, 1044, 1044, 1043.853
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop latest sample: `297 cycles = 1.747 us`.
+- Fast-loop mean execution: `403.793 cycles = 2.375 us`.
+- Fast-loop max execution: `831 cycles = 4.888 us`.
+- Combined 100 us max load: `(5 * 831 + 1044) / 17000 = 30.58%`.
+- Combined 100 us mean load: `(5 * 403.793 + 1043.875) / 17000 = 18.02%`.
+- The detailed readout confirms that the fast-loop max is a historical tail event; the latest fast-loop sample is below both the Rust mean and the C++ no-voltage fast-loop mean.

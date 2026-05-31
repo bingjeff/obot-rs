@@ -38,9 +38,12 @@ fn run(args: Vec<String>) -> Result<String, String> {
     match command.as_str() {
         "decode-hex" => decode_hex_command(rest),
         "decode-file" => decode_file_command(rest),
+        "decode-detail-hex" => decode_detail_hex_command(rest),
+        "decode-detail-file" => decode_detail_file_command(rest),
         "decode-status-hex" => decode_status_hex_command(rest),
         "decode-driver-hex" => decode_driver_hex_command(rest),
         "read-jlink" => read_jlink_command(rest),
+        "read-jlink-detail" => read_jlink_detail_command(rest),
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
@@ -72,6 +75,27 @@ fn decode_file_command(args: &[String]) -> Result<String, String> {
     decode_packet_csv(&bytes)
 }
 
+fn decode_detail_hex_command(args: &[String]) -> Result<String, String> {
+    if args.is_empty() {
+        return Err("decode-detail-hex requires packet bytes".to_string());
+    }
+
+    let bytes = parse_hex_bytes(&args.join(" "))?;
+    decode_packet_detail_csv(&bytes)
+}
+
+fn decode_detail_file_command(args: &[String]) -> Result<String, String> {
+    let path = args
+        .first()
+        .ok_or_else(|| "decode-detail-file requires a path".to_string())?;
+    if args.len() > 1 {
+        return Err("decode-detail-file accepts exactly one path".to_string());
+    }
+
+    let bytes = fs::read(path).map_err(|error| format!("failed to read `{path}`: {error}"))?;
+    decode_packet_detail_csv(&bytes)
+}
+
 fn decode_status_hex_command(args: &[String]) -> Result<String, String> {
     if args.is_empty() {
         return Err("decode-status-hex requires packet bytes".to_string());
@@ -94,6 +118,12 @@ fn read_jlink_command(args: &[String]) -> Result<String, String> {
     let options = JlinkOptions::parse(args)?;
     let bytes = read_jlink_bytes(&options, BENCHMARK_PACKET_LEN)?;
     decode_packet_csv(&bytes)
+}
+
+fn read_jlink_detail_command(args: &[String]) -> Result<String, String> {
+    let options = JlinkOptions::parse(args)?;
+    let bytes = read_jlink_bytes(&options, BENCHMARK_PACKET_LEN)?;
+    decode_packet_detail_csv(&bytes)
 }
 
 fn read_status_jlink_command(args: &[String]) -> Result<String, String> {
@@ -553,6 +583,11 @@ fn decode_packet_csv(bytes: &[u8]) -> Result<String, String> {
     Ok(format_run_stats_csv(DEFAULT_NAME, packet))
 }
 
+fn decode_packet_detail_csv(bytes: &[u8]) -> Result<String, String> {
+    let packet = decode_packet(bytes)?;
+    Ok(format_benchmark_detail_csv(DEFAULT_NAME, packet))
+}
+
 fn decode_status_csv(bytes: &[u8]) -> Result<String, String> {
     let packet = decode_status_packet(bytes)?;
     Ok(format_status_csv(DEFAULT_NAME, packet))
@@ -650,6 +685,32 @@ fn format_run_stats_csv(name: &str, packet: BenchmarkPacket) -> String {
     )
 }
 
+fn format_benchmark_detail_csv(name: &str, packet: BenchmarkPacket) -> String {
+    let report = packet.report;
+    let rows = [
+        ("fast_period", report.fast.period),
+        ("fast_execution", report.fast.execution),
+        ("main_period", report.main.period),
+        ("main_execution", report.main.execution),
+    ];
+
+    let mut output =
+        "name, sequence, metric, samples, last_cycles, max_cycles, mean_cycles\n".to_string();
+    for (metric, stats) in rows {
+        output.push_str(&format!(
+            "{}, {}, {}, {}, {}, {}, {}\n",
+            name,
+            packet.sequence,
+            metric,
+            stats.samples,
+            stats.last_cycles,
+            stats.max_cycles,
+            format_milli_cycles(stats.mean_milli_cycles),
+        ));
+    }
+    output
+}
+
 fn format_milli_cycles(value: u64) -> String {
     let whole = value / 1_000;
     let fraction = value % 1_000;
@@ -723,8 +784,27 @@ fn parse_jlink_mem8_output(output: &str, expected_len: usize) -> Result<Vec<u8>,
 
 fn usage() -> String {
     format!(
-        "usage:\n  obot-bench-debug decode-hex <{} benchmark bytes as hex>\n  obot-bench-debug decode-file <path-to-raw-{}-byte-benchmark-packet>\n  obot-bench-debug decode-status-hex <{} status bytes as hex>\n  obot-bench-debug decode-driver-hex <{} driver report bytes as hex>\n  obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]\n  obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]\n  obot-bench-debug read-status-jlink --address <status-packet-address> [--speed 4000]\n  obot-bench-debug read-driver-jlink --address <driver-report-address> [--speed 4000]\n  obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position] [--torque Nm] [--velocity rad_s] [--position rad]\n  obot-bench-debug write-driver-command-jlink --packet-address <driver-command-packet-address> --sequence-address <driver-command-sequence-address> [--sequence N] [--command disable|configure-enable]\n",
-        BENCHMARK_PACKET_LEN, BENCHMARK_PACKET_LEN, STATUS_PACKET_LEN, DRIVER_REPORT_PACKET_LEN
+        "usage:
+  obot-bench-debug decode-hex <{} benchmark bytes as hex>
+  obot-bench-debug decode-file <path-to-raw-{}-byte-benchmark-packet>
+  obot-bench-debug decode-detail-hex <{} benchmark bytes as hex>
+  obot-bench-debug decode-detail-file <path-to-raw-{}-byte-benchmark-packet>
+  obot-bench-debug decode-status-hex <{} status bytes as hex>
+  obot-bench-debug decode-driver-hex <{} driver report bytes as hex>
+  obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]
+  obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]
+  obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
+  obot-bench-debug read-status-jlink --address <status-packet-address> [--speed 4000]
+  obot-bench-debug read-driver-jlink --address <driver-report-address> [--speed 4000]
+  obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position] [--torque Nm] [--velocity rad_s] [--position rad]
+  obot-bench-debug write-driver-command-jlink --packet-address <driver-command-packet-address> --sequence-address <driver-command-sequence-address> [--sequence N] [--command disable|configure-enable]
+",
+        BENCHMARK_PACKET_LEN,
+        BENCHMARK_PACKET_LEN,
+        BENCHMARK_PACKET_LEN,
+        BENCHMARK_PACKET_LEN,
+        STATUS_PACKET_LEN,
+        DRIVER_REPORT_PACKET_LEN
     )
 }
 
@@ -788,6 +868,16 @@ mod tests {
         assert_eq!(
             output,
             "name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period\nrust, 710, 3416, 6445, 17045, 708.965, 3397.56, 3555.49, 16999.8\n"
+        );
+    }
+
+    #[test]
+    fn prints_detailed_benchmark_shape() {
+        let output = format_benchmark_detail_csv("rust", sample_packet());
+
+        assert_eq!(
+            output,
+            "name, sequence, metric, samples, last_cycles, max_cycles, mean_cycles\nrust, 9, fast_period, 10, 3398, 3416, 3397.56\nrust, 9, fast_execution, 11, 709, 710, 708.965\nrust, 9, main_period, 12, 17000, 17045, 16999.8\nrust, 9, main_execution, 13, 3555, 6445, 3555.49\n"
         );
     }
 
