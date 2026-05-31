@@ -171,7 +171,6 @@ pub struct FocController {
     id_filter: FirstOrderLowPassFilter,
     iq_filter: FirstOrderLowPassFilter,
     i_gain: f32,
-    status: FocStatus,
 }
 
 impl FocController {
@@ -183,7 +182,6 @@ impl FocController {
             id_filter: FirstOrderLowPassFilter::new(dt, param.current_filter_frequency_hz),
             iq_filter: FirstOrderLowPassFilter::new(dt, param.current_filter_frequency_hz),
             i_gain: 0.0,
-            status: FocStatus::default(),
         }
     }
 
@@ -211,21 +209,15 @@ impl FocController {
         self.pi_q.initialize();
     }
 
-    pub const fn status(&self) -> &FocStatus {
-        &self.status
-    }
-
     #[inline(always)]
     pub fn step_with_sincos(&mut self, command: &FocCommand, sin_t: f32, cos_t: f32) -> FocStatus {
         let (measured, voltage_command) =
             self.step_parts(command.desired, command.measured.currents, sin_t, cos_t);
-        let status = FocStatus {
+        FocStatus {
             desired: command.desired,
             measured,
             command: voltage_command,
-        };
-        self.status = status;
-        status
+        }
     }
 
     #[inline(always)]
