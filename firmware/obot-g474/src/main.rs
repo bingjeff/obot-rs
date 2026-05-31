@@ -111,7 +111,8 @@ fn firmware_main() -> ! {
                 let foc_status =
                     foc.step_with_sincos(&foc_command, hall_sincos.sin, hall_sincos.cos);
                 let pwm_compares = pwm.compares_from_voltages(foc_status.command);
-                core::hint::black_box((foc_status, pwm_compares));
+                core::hint::black_box(foc_status);
+                core::hint::black_box(pwm_compares);
                 core::hint::black_box(controller.state());
             });
         }
