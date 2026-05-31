@@ -28,6 +28,10 @@ const DEFAULT_SPEED_KHZ: u32 = 4_000;
 const DEFAULT_ELF_PATH: &str = "target/thumbv7em-none-eabihf/release/obot-g474";
 const CYCLES_PER_100_US: u64 = 17_000;
 const FAST_LOOPS_PER_MAIN_LOOP: u64 = 5;
+const CXX_MOTOR_HALL_MAX_FAST_LOOP_CYCLES: u64 = 710;
+const CXX_MOTOR_HALL_MAX_MAIN_LOOP_CYCLES: u64 = 6_445;
+const CXX_MOTOR_HALL_MEAN_FAST_LOOP_MILLI_CYCLES: u64 = 708_965;
+const CXX_MOTOR_HALL_MEAN_MAIN_LOOP_MILLI_CYCLES: u64 = 3_555_490;
 const BENCHMARK_PACKET_SYMBOL: &str = "OBOT_BENCHMARK_PACKET";
 const BUS_VOLTAGE_PACKET_SYMBOL: &str = "OBOT_BUS_VOLTAGE_PACKET";
 const COMMAND_PACKET_SYMBOL: &str = "OBOT_COMMAND_PACKET";
@@ -95,6 +99,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "read-jlink-detail" => read_jlink_detail_command(rest),
         "run-stats-jlink" => run_stats_jlink_command(rest),
         "run-stats-usb" => run_stats_usb_command(rest),
+        "compare-baseline-usb" => compare_baseline_usb_command(rest),
         "verify-no-heap" => verify_no_heap_command(rest),
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
@@ -242,6 +247,12 @@ fn run_stats_usb_command(args: &[String]) -> Result<String, String> {
     let options = UsbRunStatsOptions::parse(args)?;
     let stats = read_usb_run_stats(&options)?;
     Ok(format_usb_run_stats_csv(DEFAULT_NAME, stats))
+}
+
+fn compare_baseline_usb_command(args: &[String]) -> Result<String, String> {
+    let options = UsbRunStatsOptions::parse(args)?;
+    let stats = read_usb_run_stats(&options)?;
+    format_usb_baseline_comparison_csv(stats)
 }
 
 fn read_text_api_usb_command(args: &[String]) -> Result<String, String> {
@@ -759,6 +770,14 @@ struct UsbRunStats {
     mean_fast_loop_period_milli: u64,
     mean_main_loop_cycles_milli: u64,
     mean_main_loop_period_milli: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BaselineComparison {
+    rust_combined_max_cycles: u64,
+    cxx_combined_max_cycles: u64,
+    rust_combined_mean_milli_cycles: u64,
+    cxx_combined_mean_milli_cycles: u64,
 }
 
 #[repr(C)]
@@ -2351,6 +2370,49 @@ fn format_usb_run_stats_csv(name: &str, stats: UsbRunStats) -> String {
     )
 }
 
+fn usb_baseline_comparison(stats: UsbRunStats) -> BaselineComparison {
+    BaselineComparison {
+        rust_combined_max_cycles: FAST_LOOPS_PER_MAIN_LOOP * stats.max_fast_loop_cycles as u64
+            + stats.max_main_loop_cycles as u64,
+        cxx_combined_max_cycles: FAST_LOOPS_PER_MAIN_LOOP * CXX_MOTOR_HALL_MAX_FAST_LOOP_CYCLES
+            + CXX_MOTOR_HALL_MAX_MAIN_LOOP_CYCLES,
+        rust_combined_mean_milli_cycles: FAST_LOOPS_PER_MAIN_LOOP
+            * stats.mean_fast_loop_cycles_milli
+            + stats.mean_main_loop_cycles_milli,
+        cxx_combined_mean_milli_cycles: FAST_LOOPS_PER_MAIN_LOOP
+            * CXX_MOTOR_HALL_MEAN_FAST_LOOP_MILLI_CYCLES
+            + CXX_MOTOR_HALL_MEAN_MAIN_LOOP_MILLI_CYCLES,
+    }
+}
+
+fn format_usb_baseline_comparison_csv(stats: UsbRunStats) -> Result<String, String> {
+    let comparison = usb_baseline_comparison(stats);
+    let max_pass = comparison.rust_combined_max_cycles < comparison.cxx_combined_max_cycles;
+    let mean_pass =
+        comparison.rust_combined_mean_milli_cycles < comparison.cxx_combined_mean_milli_cycles;
+    let output = format!(
+        "metric, rust_cycles, cxx_cycles, rust_load_percent, cxx_load_percent, result\ncombined_max, {}, {}, {}, {}, {}\ncombined_mean, {}, {}, {}, {}, {}\n",
+        comparison.rust_combined_max_cycles,
+        comparison.cxx_combined_max_cycles,
+        format_percent(comparison.rust_combined_max_cycles, CYCLES_PER_100_US),
+        format_percent(comparison.cxx_combined_max_cycles, CYCLES_PER_100_US),
+        if max_pass { "pass" } else { "fail" },
+        format_milli_cycles(comparison.rust_combined_mean_milli_cycles),
+        format_milli_cycles(comparison.cxx_combined_mean_milli_cycles),
+        format_milli_percent(
+            comparison.rust_combined_mean_milli_cycles,
+            CYCLES_PER_100_US
+        ),
+        format_milli_percent(comparison.cxx_combined_mean_milli_cycles, CYCLES_PER_100_US),
+        if mean_pass { "pass" } else { "fail" },
+    );
+    if max_pass && mean_pass {
+        Ok(output)
+    } else {
+        Err(output)
+    }
+}
+
 fn format_run_stats_csv(name: &str, packet: BenchmarkPacket) -> String {
     let report = packet.report;
     format!(
@@ -2511,6 +2573,7 @@ fn usage() -> String {
   obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
+  obot-bench-debug compare-baseline-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
   obot-bench-debug verify-no-heap [--elf target/thumbv7em-none-eabihf/release/obot-g474]
   obot-bench-debug read-status-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <status-packet-address>] [--speed 4000]
   obot-bench-debug read-driver-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <driver-report-address>] [--speed 4000]
@@ -3051,6 +3114,46 @@ mod tests {
             output,
             "name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period\nrust, 710, 3416, 6445, 17045, 708.965, 3397.56, 3555.49, 16999.8\n"
         );
+    }
+
+    #[test]
+    fn compares_usb_stats_against_cxx_baseline() {
+        let stats = UsbRunStats {
+            max_fast_loop_cycles: 305,
+            max_fast_loop_period: 3_409,
+            max_main_loop_cycles: 2_426,
+            max_main_loop_period: 17_004,
+            mean_fast_loop_cycles_milli: 305_000,
+            mean_fast_loop_period_milli: 3_409_000,
+            mean_main_loop_cycles_milli: 2_426_000,
+            mean_main_loop_period_milli: 17_004_000,
+        };
+
+        let output = format_usb_baseline_comparison_csv(stats).unwrap();
+
+        assert_eq!(
+            output,
+            "metric, rust_cycles, cxx_cycles, rust_load_percent, cxx_load_percent, result\ncombined_max, 3951, 9995, 23.24, 58.79, pass\ncombined_mean, 3951, 7100.315, 23.24, 41.77, pass\n"
+        );
+    }
+
+    #[test]
+    fn fails_usb_baseline_comparison_when_rust_does_not_beat_cxx() {
+        let stats = UsbRunStats {
+            max_fast_loop_cycles: CXX_MOTOR_HALL_MAX_FAST_LOOP_CYCLES as u32,
+            max_fast_loop_period: 3_416,
+            max_main_loop_cycles: CXX_MOTOR_HALL_MAX_MAIN_LOOP_CYCLES as u32,
+            max_main_loop_period: 17_045,
+            mean_fast_loop_cycles_milli: CXX_MOTOR_HALL_MEAN_FAST_LOOP_MILLI_CYCLES,
+            mean_fast_loop_period_milli: 3_397_560,
+            mean_main_loop_cycles_milli: CXX_MOTOR_HALL_MEAN_MAIN_LOOP_MILLI_CYCLES,
+            mean_main_loop_period_milli: 16_999_800,
+        };
+
+        let output = format_usb_baseline_comparison_csv(stats).unwrap_err();
+
+        assert!(output.contains("combined_max, 9995, 9995, 58.79, 58.79, fail"));
+        assert!(output.contains("combined_mean, 7100.315, 7100.315, 41.77, 41.77, fail"));
     }
 
     #[test]

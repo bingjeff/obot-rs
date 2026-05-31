@@ -38,6 +38,12 @@ The same benchmark shape can be collected over the Rust firmware's USB text endp
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- run-stats-usb 100
 ```
 
+To make the current Rust-vs-C++ performance gate repeatable on hardware, compare the USB benchmark sample against the recorded no-voltage C++ `motor_hall` baseline:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- compare-baseline-usb 100
+```
+
 For one-off USB text API reads, use:
 
 ```sh
