@@ -150,3 +150,64 @@ Interpretation at 170 MHz:
 Comparison caveat:
 
 This build configures and reads PA0/PA1/PA2 hall inputs and runs the same hall lookup/wrap logic as the C++ `HallEncoder`. It keeps all HRTIM outputs disabled and still does not include ADC sampling, current control, voltage control, safety/fault handling, or host API parity.
+
+
+## 2026-05-31: Current ADC Injected Sample Surface, J-Link Debug Readout
+
+Firmware commit: `0353082 Add current ADC readback`
+
+Build and flash steps used:
+
+```sh
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+/home/bingjeff/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy \
+  -O binary \
+  target/thumbv7em-none-eabihf/release/obot-g474 \
+  target/thumbv7em-none-eabihf/release/obot-g474.bin
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink
+```
+
+Release artifact sizes:
+
+```text
+133292 target/thumbv7em-none-eabihf/release/obot-g474
+  8760 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+Flash result:
+
+```text
+J-Link: Flash download: Bank 0 @ 0x08000000: 1 range affected (10240 bytes)
+J-Link: Flash download: Program & Verify speed: 77 KB/s
+O.K.
+```
+
+Representative readout after flashing:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 292, 3464, 131, 17006, 144.001, 3399.798, 130.929, 16989.648
+```
+
+Direct ADC injected data register readback from the running firmware:
+
+```text
+ADC3 JDR1 @ 0x50000480 = 0x0331
+ADC4 JDR1 @ 0x50000580 = 0x069F
+ADC5 JDR1 @ 0x50000680 = 0x05FC
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `144.001 cycles = 0.847 us`.
+- Main-loop mean execution: `130.929 cycles = 0.770 us`.
+- Fast-loop mean period: `3399.798 cycles = 19.999 us`.
+- Main-loop mean period: `16989.648 cycles = 99.939 us` in the sampled running average.
+- Combined 100 us max safe-zero-PWM-plus-hall-plus-current-ADC load: `(5 * 292 + 131) / 17000 = 9.36%`.
+- Combined 100 us mean safe-zero-PWM-plus-hall-plus-current-ADC load: `(5 * 144.001 + 130.929) / 17000 = 5.01%`.
+- Incremental mean fast-loop cost over hall GPIO readback: `144.001 - 118.577 = 25.424 cycles = 0.150 us`.
+
+Comparison caveat:
+
+This build configures ADC3/4/5 injected current channels, starts HRTIM-triggered injected conversions, and reads the resulting injected data registers in the fast loop. It keeps all HRTIM outputs disabled and still does not include ADC1/ADC2 housekeeping, bus voltage, temperature/vref scaling, current-control math, voltage control, safety/fault handling, or host API parity.
