@@ -119,9 +119,7 @@ fn firmware_main() -> ! {
 
         if poll.main {
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
-                let bus_voltage_raw = current_adc.read_bus_voltage_raw();
-                let output_allowed = output_gate.allows_output_raw(bus_voltage_raw);
-                core::hint::black_box((bus_voltage_raw, output_allowed));
+                monitor_bus_voltage(&current_adc, output_gate);
                 core::hint::black_box(controller.state());
             });
             benchmark_sequence = publish_benchmark_report(
@@ -134,6 +132,14 @@ fn firmware_main() -> ! {
             core::hint::spin_loop();
         }
     }
+}
+
+#[cfg(target_os = "none")]
+#[inline(never)]
+fn monitor_bus_voltage(current_adc: &CurrentAdc, output_gate: OutputGate) {
+    let bus_voltage_raw = current_adc.read_bus_voltage_raw();
+    let output_allowed = output_gate.allows_output_raw(bus_voltage_raw);
+    core::hint::black_box((bus_voltage_raw, output_allowed));
 }
 
 #[cfg(target_os = "none")]
