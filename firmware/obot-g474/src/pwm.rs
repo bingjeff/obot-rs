@@ -119,7 +119,6 @@ impl PhaseCompares {
 }
 
 pub struct SafeZeroPwm {
-    config: PwmConfig,
     bridge_outputs_armed: bool,
 }
 
@@ -135,7 +134,6 @@ impl SafeZeroPwm {
         enable_hrtim_clock();
         disable_outputs();
         let pwm = Self {
-            config: PwmConfig::MOTOR_HALL_SAFE_ZERO,
             bridge_outputs_armed: false,
         };
         pwm.configure_timer(TIMER_D);
@@ -187,8 +185,8 @@ impl SafeZeroPwm {
         }
     }
 
-    pub fn config(&self) -> PwmConfig {
-        self.config
+    pub const fn config(&self) -> PwmConfig {
+        PwmConfig::MOTOR_HALL_SAFE_ZERO
     }
 
     pub fn bridge_output_status(&self) -> BridgeOutputStatus {
@@ -197,19 +195,10 @@ impl SafeZeroPwm {
 
     fn configure_timer(&self, timer: usize) {
         write(timer_register(timer, HRTIM_TIMXCR2), HRTIM_TIMCR2_UDM);
-        write(
-            timer_register(timer, HRTIM_PERXR),
-            self.config.period_counts,
-        );
-        write(
-            timer_register(timer, HRTIM_CMP1XR),
-            self.config.zero_compare_counts,
-        );
+        write(timer_register(timer, HRTIM_PERXR), PWM_PERIOD);
+        write(timer_register(timer, HRTIM_CMP1XR), PWM_ZERO_COMPARE);
         write(timer_register(timer, HRTIM_OUTXR), HRTIM_OUTR_DTEN);
-        write(
-            timer_register(timer, HRTIM_DTXR),
-            deadtime_register(self.config),
-        );
+        write(timer_register(timer, HRTIM_DTXR), deadtime_register());
         modify(timer_register(timer, HRTIM_TIMXCR), |value| {
             value | HRTIM_TIMCR_RUN
         });
@@ -232,7 +221,7 @@ impl SafeZeroPwm {
     }
 
     fn write_phase_zero(&self, timer: usize) {
-        self.write_phase_compare(timer, self.config.zero_compare_counts);
+        self.write_phase_compare(timer, PWM_ZERO_COMPARE);
     }
 
     #[inline(always)]
@@ -249,12 +238,8 @@ impl SafeZeroPwm {
 
     #[inline(always)]
     fn compare_from_voltage(&self, voltage: f32) -> u32 {
-        let scaled = voltage * self.config.counts_per_volt + self.config.zero_compare_counts_f32;
-        clamp_compare(
-            scaled,
-            self.config.min_compare_counts_i32,
-            self.config.max_compare_counts_i32,
-        )
+        let scaled = voltage * PWM_COUNTS_PER_VOLT + PWM_ZERO_COMPARE_F32;
+        clamp_compare(scaled, PWM_MIN_COMPARE_I32, PWM_MAX_COMPARE_I32)
     }
 }
 
@@ -302,8 +287,8 @@ fn clamp_compare(value: f32, min: i32, max: i32) -> u32 {
     compare.clamp(min, max) as u32
 }
 
-fn deadtime_register(config: PwmConfig) -> u32 {
-    (config.deadtime_counts << HRTIM_DTR_DTF_POS) | (config.deadtime_counts << HRTIM_DTR_DTR_POS)
+fn deadtime_register() -> u32 {
+    (DEADTIME_COUNTS << HRTIM_DTR_DTF_POS) | (DEADTIME_COUNTS << HRTIM_DTR_DTR_POS)
 }
 
 #[inline(always)]
