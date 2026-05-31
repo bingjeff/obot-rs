@@ -18,7 +18,7 @@ use obot_protocol::{
     DRIVER_REPORT_PACKET_LEN, DriverCommand, DriverCommandPacket, DriverReportPacket,
     OUTPUT_SAFETY_PACKET_LEN, OutputSafetyPacket, STATUS_PACKET_LEN, StatusPacket,
     TEXT_API_RESPONSE_PACKET_LEN, TextApiRequestPacket, TextApiResponsePacket,
-    TextApiResponseStatus,
+    TextApiResponseStatus, usb_control,
 };
 
 const DEFAULT_NAME: &str = "rust_debug";
@@ -650,7 +650,7 @@ impl SymbolReadOptions {
 
 #[derive(Clone, Debug, PartialEq)]
 struct RealtimeUsbOptions {
-    device_path: PathBuf,
+    device_path: Option<PathBuf>,
     sequence: u8,
     mode: ControlMode,
     torque_nm: f32,
@@ -742,7 +742,7 @@ struct ResolvedTextApiRequestWriteOptions {
 impl RealtimeUsbOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
-            device_path: PathBuf::new(),
+            device_path: None,
             sequence: 1,
             mode: ControlMode::Disabled,
             torque_nm: 0.0,
@@ -759,7 +759,7 @@ impl RealtimeUsbOptions {
                     let path = args
                         .get(index)
                         .ok_or_else(|| "--dev requires a value".to_string())?;
-                    options.device_path = PathBuf::from(path);
+                    options.device_path = Some(PathBuf::from(path));
                 }
                 "--sequence" => {
                     index += 1;
@@ -796,12 +796,103 @@ impl RealtimeUsbOptions {
             index += 1;
         }
 
-        if options.device_path.as_os_str().is_empty() {
-            return Err("write-command-usb requires --dev /dev/bus/usb/<bus>/<dev>".to_string());
-        }
-
         Ok(options)
     }
+
+    fn resolved_device_path(&self) -> Result<PathBuf, String> {
+        match &self.device_path {
+            Some(path) => Ok(path.clone()),
+            None => discover_obot_usb_device_path(),
+        }
+    }
+}
+
+fn discover_obot_usb_device_path() -> Result<PathBuf, String> {
+    discover_usb_device_path(
+        Path::new("/sys/bus/usb/devices"),
+        Path::new("/dev/bus/usb"),
+        usb_control::VENDOR_ID,
+        usb_control::PRODUCT_ID,
+    )
+}
+
+fn discover_usb_device_path(
+    sysfs_root: &Path,
+    usbfs_root: &Path,
+    vendor_id: u16,
+    product_id: u16,
+) -> Result<PathBuf, String> {
+    let entries = fs::read_dir(sysfs_root)
+        .map_err(|error| format!("failed to read `{}`: {error}", sysfs_root.display()))?;
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("failed to inspect `{}`: {error}", sysfs_root.display()))?;
+        let path = entry.path();
+        if !usb_identity_matches(&path, vendor_id, product_id)? {
+            continue;
+        }
+        let bus = read_sysfs_u16(&path.join("busnum"))?;
+        let device = read_sysfs_u16(&path.join("devnum"))?;
+        matches.push(format_usbfs_path(usbfs_root, bus, device));
+    }
+
+    match matches.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(format!(
+            "no OBOT USB device {:04x}:{:04x} found; pass --dev /dev/bus/usb/<bus>/<dev>",
+            vendor_id, product_id
+        )),
+        _ => Err(format!(
+            "multiple OBOT USB devices {:04x}:{:04x} found: {}; pass --dev to choose one",
+            vendor_id,
+            product_id,
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn usb_identity_matches(path: &Path, vendor_id: u16, product_id: u16) -> Result<bool, String> {
+    let id_vendor = path.join("idVendor");
+    let id_product = path.join("idProduct");
+    if !id_vendor.exists() || !id_product.exists() {
+        return Ok(false);
+    }
+
+    Ok(read_sysfs_hex_u16(&id_vendor)? == vendor_id
+        && read_sysfs_hex_u16(&id_product)? == product_id)
+}
+
+fn read_sysfs_hex_u16(path: &Path) -> Result<u16, String> {
+    let value = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+    u16::from_str_radix(value.trim(), 16).map_err(|_| {
+        format!(
+            "invalid hex value `{}` in `{}`",
+            value.trim(),
+            path.display()
+        )
+    })
+}
+
+fn read_sysfs_u16(path: &Path) -> Result<u16, String> {
+    let value = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+    value.trim().parse().map_err(|_| {
+        format!(
+            "invalid decimal value `{}` in `{}`",
+            value.trim(),
+            path.display()
+        )
+    })
+}
+
+fn format_usbfs_path(root: &Path, bus: u16, device: u16) -> PathBuf {
+    root.join(format!("{bus:03}")).join(format!("{device:03}"))
 }
 
 impl Drop for UsbInterfaceClaim<'_> {
@@ -821,16 +912,12 @@ fn transact_realtime_usb(
     options: &RealtimeUsbOptions,
     packet: CommandPacket,
 ) -> Result<StatusPacket, String> {
+    let device_path = options.resolved_device_path()?;
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&options.device_path)
-        .map_err(|error| {
-            format!(
-                "failed to open `{}`: {error}",
-                options.device_path.display()
-            )
-        })?;
+        .open(&device_path)
+        .map_err(|error| format!("failed to open `{}`: {error}", device_path.display()))?;
     let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
 
     let mut command = packet.encode();
@@ -2055,7 +2142,7 @@ fn usage() -> String {
   obot-bench-debug write-text-api-request-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <text-api-request-address>] [--sequence-address <text-api-request-sequence-address>] [--sequence N] <api-request>
   obot-bench-debug read-text-api-response-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <text-api-response-address>] [--speed 4000]
   obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
-  obot-bench-debug write-command-usb --dev /dev/bus/usb/<bus>/<dev> [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad] [--timeout-ms N]
+  obot-bench-debug write-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad] [--timeout-ms N]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
 ",
         BENCHMARK_PACKET_LEN,
@@ -2516,7 +2603,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(options.device_path, PathBuf::from("/dev/bus/usb/001/043"));
+        assert_eq!(
+            options.device_path,
+            Some(PathBuf::from("/dev/bus/usb/001/043"))
+        );
         assert_eq!(options.sequence, 77);
         assert_eq!(options.mode, ControlMode::Velocity);
         assert_eq!(options.velocity_rad_s, 3.5);
@@ -2524,10 +2614,49 @@ mod tests {
     }
 
     #[test]
-    fn realtime_usb_options_require_device_path() {
-        let error = RealtimeUsbOptions::parse(&[]).unwrap_err();
+    fn realtime_usb_options_can_discover_device_path() {
+        let options = RealtimeUsbOptions::parse(&[]).unwrap();
 
-        assert!(error.contains("requires --dev"));
+        assert_eq!(options.device_path, None);
+        assert_eq!(options.sequence, 1);
+        assert_eq!(options.mode, ControlMode::Disabled);
+    }
+
+    #[test]
+    fn formats_usbfs_path_with_zero_padded_bus_and_device() {
+        assert_eq!(
+            format_usbfs_path(Path::new("/dev/bus/usb"), 1, 43),
+            PathBuf::from("/dev/bus/usb/001/043")
+        );
+    }
+
+    #[test]
+    fn discovers_usb_device_path_from_sysfs_identity() {
+        let root = env::temp_dir().join(format!(
+            "obot-bench-debug-test-{}-{}",
+            std::process::id(),
+            monotonic_suffix()
+        ));
+        let sysfs = root.join("sys");
+        let usbfs = root.join("dev");
+        let device = sysfs.join("1-10");
+        fs::create_dir_all(&device).unwrap();
+        fs::create_dir_all(usbfs.join("001")).unwrap();
+        fs::write(device.join("idVendor"), "3293\n").unwrap();
+        fs::write(device.join("idProduct"), "0100\n").unwrap();
+        fs::write(device.join("busnum"), "1\n").unwrap();
+        fs::write(device.join("devnum"), "43\n").unwrap();
+
+        let discovered = discover_usb_device_path(
+            &sysfs,
+            &usbfs,
+            usb_control::VENDOR_ID,
+            usb_control::PRODUCT_ID,
+        )
+        .unwrap();
+
+        assert_eq!(discovered, usbfs.join("001").join("043"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
