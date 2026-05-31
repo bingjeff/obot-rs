@@ -42,6 +42,7 @@ const MIN_OFF_COUNTS: u32 = 2 * MIN_OFF_NS * HRTIM_COUNTS_PER_US / 1_000;
 const MIN_ON_COUNTS: u32 = 2 * MIN_ON_NS * HRTIM_COUNTS_PER_US / 1_000;
 const PWM_MIN_COMPARE: u32 = MIN_OFF_COUNTS;
 const PWM_MAX_COMPARE: u32 = PWM_PERIOD - max_u32(MIN_ON_COUNTS, 65);
+const PWM_COUNTS_PER_VOLT: f32 = PWM_PERIOD as f32 / NOMINAL_VBUS_V;
 
 const HRTIM_TIMCR_CONT: u32 = 1 << 3;
 const HRTIM_TIMCR_TRSTU: u32 = 1 << 18;
@@ -69,6 +70,7 @@ pub struct PwmConfig {
     pub min_compare_counts: u32,
     pub max_compare_counts: u32,
     pub nominal_vbus_v: f32,
+    pub counts_per_volt: f32,
 }
 
 impl PwmConfig {
@@ -80,6 +82,7 @@ impl PwmConfig {
         min_compare_counts: PWM_MIN_COMPARE,
         max_compare_counts: PWM_MAX_COMPARE,
         nominal_vbus_v: NOMINAL_VBUS_V,
+        counts_per_volt: PWM_COUNTS_PER_VOLT,
     };
 }
 
@@ -187,8 +190,7 @@ impl SafeZeroPwm {
 
     #[inline(always)]
     fn compare_from_voltage(&self, voltage: f32) -> u32 {
-        let scaled = voltage * (self.config.period_counts as f32 / self.config.nominal_vbus_v)
-            + self.config.zero_compare_counts as f32;
+        let scaled = voltage * self.config.counts_per_volt + self.config.zero_compare_counts as f32;
         clamp_compare(
             scaled,
             self.config.min_compare_counts,
@@ -276,16 +278,16 @@ mod tests {
         assert_eq!(config.min_compare_counts, 2_720);
         assert_eq!(config.max_compare_counts, 54_335);
         assert_eq!(config.nominal_vbus_v, 12.0);
+        assert_eq!(config.counts_per_volt, 54_400.0 / 12.0);
     }
 
     #[test]
     fn compare_from_voltage_matches_cpp_formula() {
         let config = PwmConfig::MOTOR_HALL_SAFE_ZERO;
-        let counts_per_volt = config.period_counts as f32 / config.nominal_vbus_v;
 
         assert_eq!(
             clamp_compare(
-                1.5 * counts_per_volt + config.zero_compare_counts as f32,
+                1.5 * config.counts_per_volt + config.zero_compare_counts as f32,
                 config.min_compare_counts,
                 config.max_compare_counts
             ),
@@ -293,7 +295,7 @@ mod tests {
         );
         assert_eq!(
             clamp_compare(
-                -100.0 * counts_per_volt + config.zero_compare_counts as f32,
+                -100.0 * config.counts_per_volt + config.zero_compare_counts as f32,
                 config.min_compare_counts,
                 config.max_compare_counts
             ),
@@ -301,7 +303,7 @@ mod tests {
         );
         assert_eq!(
             clamp_compare(
-                100.0 * counts_per_volt + config.zero_compare_counts as f32,
+                100.0 * config.counts_per_volt + config.zero_compare_counts as f32,
                 config.min_compare_counts,
                 config.max_compare_counts
             ),
