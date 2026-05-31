@@ -5,6 +5,7 @@ pub mod current;
 pub mod foc;
 pub mod hall;
 pub mod host;
+pub mod outer_loop;
 pub mod output;
 pub mod power;
 pub mod text_api;

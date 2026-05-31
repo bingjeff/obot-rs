@@ -28,9 +28,10 @@ use obot_core::{
 #[cfg(target_os = "none")]
 use obot_core::{
     current::CurrentCalibration,
-    foc::{FocController, FocParam, MotorHallFocMap},
+    foc::{FocController, FocParam},
     hall::{HallElectricalAngle, HallMotionEstimate, HallMotionEstimator},
     host::{HostCommandWatchdog, HostCommandWatchdogStatus},
+    outer_loop::{MotorHallOuterLoop, MotorHallOuterLoopParam},
     output::{OutputSafety, OutputSafetyInputs, OutputSafetyStatus},
     power::OutputGate,
     text_api::{ApiDispatchError, ApiRequest, ApiValue, format_value, parse_request},
@@ -66,11 +67,15 @@ const SYSTICK_RVR: *mut u32 = 0xE000_E014 as *mut u32;
 #[cfg(target_os = "none")]
 const SYSTICK_CVR: *mut u32 = 0xE000_E018 as *mut u32;
 #[cfg(target_os = "none")]
+const SCB_ICSR: *mut u32 = 0xE000_ED04 as *mut u32;
+#[cfg(target_os = "none")]
 const SYSTICK_CSR_ENABLE: u32 = 1 << 0;
 #[cfg(target_os = "none")]
 const SYSTICK_CSR_TICKINT: u32 = 1 << 1;
 #[cfg(target_os = "none")]
 const SYSTICK_CSR_CLKSOURCE_PROCESSOR: u32 = 1 << 2;
+#[cfg(target_os = "none")]
+const SCB_ICSR_PENDSTSET: u32 = 1 << 26;
 #[cfg(target_os = "none")]
 const HOST_COMMAND_TIMEOUT_MAIN_TICKS: u32 = 1_000;
 #[cfg(target_os = "none")]
@@ -140,6 +145,7 @@ fn firmware_main() -> ! {
     let usb = obot_g474::usb::UsbDevice::prepare_disconnected();
 
     let cycle_counter = SysTickCycleCounter;
+    let main_cycle_counter = SysTickMainCycleCounter;
     let driver = MotorDriverPins::init_motor_hall_disabled();
     let driver_spi = Drv8323s::init_motor_hall();
     let pwm = SafeZeroPwm::init_motor_hall();
@@ -157,8 +163,12 @@ fn firmware_main() -> ! {
     let mut output_allowed = false;
     let hall_angle = HallElectricalAngle::MOTOR_HALL;
     let mut hall_motion = HallMotionEstimator::new(42.0, -1.0, 10_000.0, 0.005);
-    let foc_map = MotorHallFocMap::MOTOR_HALL;
-    let mut foc_desired = foc_map.desired_from_state(obot_core::MotorState::default());
+    let mut outer_loop =
+        MotorHallOuterLoop::new(MotorHallOuterLoopParam::MOTOR_HALL, 1.0 / 10_000.0);
+    let mut foc_desired = outer_loop.desired_from_state(
+        obot_core::MotorState::default(),
+        HallMotionEstimate::default(),
+    );
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
     foc.current_mode();
     usb.connect();
@@ -180,7 +190,7 @@ fn firmware_main() -> ! {
     loop {
         if main_loop_due(&mut next_main_fast_tick) {
             let mut driver_action_completed = false;
-            run_preemptible_main_loop(&mut main_benchmark, &cycle_counter, || {
+            run_preemptible_main_loop(&mut main_benchmark, &main_cycle_counter, || {
                 let host_poll = service_host_debug(&mut command_sequence);
                 let host_status =
                     update_host_watchdog(&mut host_watchdog, host_poll.command_allows_output);
@@ -194,7 +204,7 @@ fn firmware_main() -> ! {
                     hall_count: 0,
                 });
                 obot_g474::usb::publish_hall_feedback(hall_feedback);
-                foc_desired = foc_map.desired_from_state(controller_state);
+                foc_desired = outer_loop.desired_from_state(controller_state, hall_feedback);
                 publish_status_report(status_sequence, controller_state);
                 status_sequence = status_sequence.wrapping_add(1);
                 if let Some(report) = driver_debug_service.service(
@@ -287,20 +297,39 @@ struct SysTickCycleCounter;
 #[cfg(target_os = "none")]
 impl CycleCounter for SysTickCycleCounter {
     fn now(&self) -> u32 {
-        systick_cycles_now()
+        systick_cycles_now(false)
     }
 }
 
 #[cfg(target_os = "none")]
-fn systick_cycles_now() -> u32 {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SysTickMainCycleCounter;
+
+#[cfg(target_os = "none")]
+impl CycleCounter for SysTickMainCycleCounter {
+    fn now(&self) -> u32 {
+        systick_cycles_now(true)
+    }
+}
+
+#[cfg(target_os = "none")]
+fn systick_cycles_now(account_pending_tick: bool) -> u32 {
     loop {
         let ticks_before = FAST_LOOP_TICKS.load(Ordering::Relaxed);
-        let current = unsafe { core::ptr::read_volatile(SYSTICK_CVR) };
+        let mut current = unsafe { core::ptr::read_volatile(SYSTICK_CVR) };
+        let pending_tick = account_pending_tick
+            && (unsafe { core::ptr::read_volatile(SCB_ICSR) } & SCB_ICSR_PENDSTSET) != 0;
         let ticks_after = FAST_LOOP_TICKS.load(Ordering::Relaxed);
         if ticks_before == ticks_after {
+            let ticks = if pending_tick {
+                current = unsafe { core::ptr::read_volatile(SYSTICK_CVR) };
+                ticks_after.wrapping_add(1)
+            } else {
+                ticks_after
+            };
             let elapsed_in_period = (FAST_LOOP_PERIOD_CYCLES - 1)
                 .saturating_sub(current.min(FAST_LOOP_PERIOD_CYCLES - 1));
-            return ticks_after
+            return ticks
                 .wrapping_mul(FAST_LOOP_PERIOD_CYCLES)
                 .wrapping_add(elapsed_in_period);
         }
@@ -1028,7 +1057,10 @@ fn apply_host_command(
 
 #[cfg(any(target_os = "none", test))]
 fn mode_allows_output(mode: ControlMode) -> bool {
-    matches!(mode, ControlMode::Torque)
+    matches!(
+        mode,
+        ControlMode::Torque | ControlMode::Velocity | ControlMode::Position
+    )
 }
 
 #[cfg(target_os = "none")]
@@ -1159,11 +1191,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_implemented_closed_loop_modes_allow_output() {
+    fn implemented_closed_loop_modes_allow_output() {
         assert!(!mode_allows_output(ControlMode::Disabled));
         assert!(mode_allows_output(ControlMode::Torque));
-        assert!(!mode_allows_output(ControlMode::Velocity));
-        assert!(!mode_allows_output(ControlMode::Position));
+        assert!(mode_allows_output(ControlMode::Velocity));
+        assert!(mode_allows_output(ControlMode::Position));
         assert!(!mode_allows_output(ControlMode::ClearFaults));
     }
 }
