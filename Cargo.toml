@@ -5,6 +5,7 @@ members = [
     "crates/obot-protocol",
     "firmware/obot-g474",
 ]
+exclude = ["tools/obot-bench-debug"]
 
 [workspace.package]
 edition = "2024"
