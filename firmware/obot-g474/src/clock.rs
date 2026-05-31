@@ -47,6 +47,10 @@ const RCC_PLLCFGR_170MHZ_HSI: u32 = RCC_PLLCFGR_PLLSRC_HSI
 const RCC_APB1ENR1_PWREN: u32 = 1 << 28;
 const FLASH_ACR_LATENCY: u32 = 0xF;
 const FLASH_ACR_LATENCY_8WS: u32 = 0x8;
+const FLASH_ACR_PRFTEN: u32 = 1 << 8;
+const FLASH_ACR_ICEN: u32 = 1 << 9;
+const FLASH_ACR_DCEN: u32 = 1 << 10;
+const FLASH_ACR_ACCELERATION: u32 = FLASH_ACR_PRFTEN | FLASH_ACR_ICEN | FLASH_ACR_DCEN;
 const PWR_CR5_R1MODE: u32 = 1 << 8;
 const PWR_SR2_VOSF: u32 = 1 << 10;
 
@@ -91,7 +95,7 @@ fn configure_power_boost() -> Result<(), ClockError> {
 
 fn set_flash_latency_8ws() {
     modify(FLASH_ACR, |value| {
-        (value & !FLASH_ACR_LATENCY) | FLASH_ACR_LATENCY_8WS
+        (value & !FLASH_ACR_LATENCY) | FLASH_ACR_LATENCY_8WS | FLASH_ACR_ACCELERATION
     });
 }
 
