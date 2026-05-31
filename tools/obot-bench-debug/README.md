@@ -62,6 +62,13 @@ cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- api-snapshot-jlin
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- api-snapshot-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474 api_name=0
 ```
 
+After flashing firmware with the text API debug packets, the firmware-owned dispatcher can be exercised through exported SRAM request/response packets:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-text-api-request-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474 --sequence 1 mean_fast_loop_cycles
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-text-api-response-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474
+```
+
 To clear a latched controller fault through the debug command packet, use the explicit clear-faults mode:
 
 ```sh

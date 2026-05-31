@@ -22,6 +22,8 @@ pub enum ApiValue<'a> {
     U16(u16),
     U32(u32),
     I32(i32),
+    Fixed3(i64),
+    #[cfg(not(target_os = "none"))]
     F32(f32),
     Str(&'a str),
 }
@@ -82,9 +84,7 @@ impl<'a> ApiCatalog<'a> {
         output: &'out mut [u8],
     ) -> Result<&'out str, ApiDispatchError> {
         let entry = self.find(name).ok_or(ApiDispatchError::UnknownName)?;
-        let mut writer = ResponseWriter::new(output);
-        write_value(&mut writer, entry.value).map_err(|_| ApiDispatchError::ResponseTooLong)?;
-        writer.finish()
+        format_value(entry.value, output)
     }
 
     pub fn name_at<'out>(
@@ -115,6 +115,15 @@ impl<'a> ApiEntry<'a> {
     pub const fn new(name: &'a str, value: ApiValue<'a>) -> Self {
         Self { name, value }
     }
+}
+
+pub fn format_value<'out>(
+    value: ApiValue<'_>,
+    output: &'out mut [u8],
+) -> Result<&'out str, ApiDispatchError> {
+    let mut writer = ResponseWriter::new(output);
+    write_value(&mut writer, value).map_err(|_| ApiDispatchError::ResponseTooLong)?;
+    writer.finish()
 }
 
 pub fn parse_request(input: &str) -> Result<ApiRequest<'_>, ApiParseError> {
@@ -215,9 +224,41 @@ fn write_value(writer: &mut ResponseWriter<'_>, value: ApiValue<'_>) -> core::fm
         ApiValue::U16(value) => write!(writer, "{}", value),
         ApiValue::U32(value) => write!(writer, "{}", value),
         ApiValue::I32(value) => write!(writer, "{}", value),
+        ApiValue::Fixed3(value) => write_fixed3(writer, value),
+        #[cfg(not(target_os = "none"))]
         ApiValue::F32(value) => write!(writer, "{}", value),
         ApiValue::Str(value) => writer.write_str(value),
     }
+}
+
+fn write_fixed3(writer: &mut ResponseWriter<'_>, value: i64) -> core::fmt::Result {
+    use core::fmt::Write;
+
+    let magnitude = value.unsigned_abs();
+    let whole = magnitude / 1_000;
+    let mut fraction = magnitude % 1_000;
+
+    if value < 0 {
+        writer.write_str("-")?;
+    }
+    write!(writer, "{}", whole)?;
+    if fraction == 0 {
+        return Ok(());
+    }
+
+    writer.write_str(".")?;
+    let hundreds = fraction / 100;
+    fraction %= 100;
+    let tens = fraction / 10;
+    let ones = fraction % 10;
+    write!(writer, "{}", hundreds)?;
+    if tens != 0 || ones != 0 {
+        write!(writer, "{}", tens)?;
+    }
+    if ones != 0 {
+        write!(writer, "{}", ones)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -285,6 +326,21 @@ mod tests {
             Ok("435.708")
         );
         assert_eq!(catalog.dispatch("fault", &mut output), Ok("none"));
+    }
+
+    #[test]
+    fn dispatches_fixed3_without_unnecessary_trailing_zeroes() {
+        let entries = [
+            ApiEntry::new("positive", ApiValue::Fixed3(435_708)),
+            ApiEntry::new("whole", ApiValue::Fixed3(17_000_000)),
+            ApiEntry::new("negative", ApiValue::Fixed3(-3_421_250)),
+        ];
+        let catalog = ApiCatalog::new(&entries);
+        let mut output = [0; 32];
+
+        assert_eq!(catalog.dispatch("positive", &mut output), Ok("435.708"));
+        assert_eq!(catalog.dispatch("whole", &mut output), Ok("17000"));
+        assert_eq!(catalog.dispatch("negative", &mut output), Ok("-3421.25"));
     }
 
     #[test]

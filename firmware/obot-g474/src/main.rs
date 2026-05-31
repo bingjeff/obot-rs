@@ -27,6 +27,7 @@ use obot_core::{
     host::{HostCommandWatchdog, HostCommandWatchdogStatus},
     output::{OutputSafety, OutputSafetyInputs, OutputSafetyStatus},
     power::OutputGate,
+    text_api::{ApiDispatchError, ApiRequest, ApiValue, format_value, parse_request},
 };
 #[cfg(target_os = "none")]
 use obot_g474::adc::CurrentAdc;
@@ -43,7 +44,7 @@ use obot_g474::pwm::SafeZeroPwm;
 #[cfg(target_os = "none")]
 use obot_protocol::{
     BenchmarkPacket, BusVoltagePacket, DriverCommand, DriverReportPacket, OutputSafetyPacket,
-    StatusPacket,
+    StatusPacket, TEXT_API_PAYLOAD_LEN, TextApiResponsePacket, TextApiResponseStatus,
 };
 
 #[cfg(target_os = "none")]
@@ -86,6 +87,9 @@ fn firmware_main() -> ! {
     let mut driver_report_sequence = 0;
     let mut output_safety_sequence = 0;
     let mut bus_voltage_sequence = 0;
+    let mut text_api_request_sequence = 0;
+    let mut last_driver_report = Drv8323sConfigReport::default();
+    let mut last_benchmark_report = BenchmarkReport::default();
     let mut host_watchdog = HostCommandWatchdog::new(HOST_COMMAND_TIMEOUT_MAIN_TICKS);
     if clock::configure_170mhz_hsi().is_err() {
         loop {
@@ -151,13 +155,16 @@ fn firmware_main() -> ! {
                 let controller_state = controller_storage_mut().state();
                 publish_status_report(status_sequence, controller_state);
                 status_sequence = status_sequence.wrapping_add(1);
-                driver_action_completed = service_driver_debug(
+                if let Some(report) = service_driver_debug(
                     &driver,
                     &driver_spi,
                     &cycle_counter,
                     &mut driver_command_sequence,
                     &mut driver_report_sequence,
-                );
+                ) {
+                    last_driver_report = report;
+                    driver_action_completed = true;
+                }
                 bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
                 bus_voltage_sequence =
                     publish_bus_voltage_report(bus_voltage_sequence, bus_voltage_raw);
@@ -172,17 +179,25 @@ fn firmware_main() -> ! {
                 output_allowed = output_safety_status.output_allowed;
                 output_safety_sequence =
                     publish_output_safety_report(output_safety_sequence, output_safety_status);
+                service_text_api_debug(
+                    &mut text_api_request_sequence,
+                    last_benchmark_report,
+                    controller_state,
+                    last_driver_report,
+                    output_safety_status,
+                    bus_voltage_raw,
+                );
                 core::hint::black_box((host_poll, host_status, controller_state.fault));
             });
             if driver_action_completed {
                 fast_benchmark = LoopBenchmark::new();
                 main_benchmark = LoopBenchmark::new();
                 benchmark_sequence = 0;
+                last_benchmark_report = BenchmarkReport::default();
             } else {
-                benchmark_sequence = publish_benchmark_report(
-                    benchmark_sequence,
-                    BenchmarkReport::from_loops(fast_benchmark, main_benchmark),
-                );
+                last_benchmark_report = BenchmarkReport::from_loops(fast_benchmark, main_benchmark);
+                benchmark_sequence =
+                    publish_benchmark_report(benchmark_sequence, last_benchmark_report);
             }
         }
 
@@ -254,6 +269,282 @@ fn force_controller_disabled() {
 }
 
 #[cfg(target_os = "none")]
+const TEXT_API_ENTRY_COUNT: usize = 37;
+
+#[cfg(target_os = "none")]
+#[inline(never)]
+fn service_text_api_debug(
+    request_sequence: &mut u8,
+    benchmark_report: BenchmarkReport,
+    controller_state: obot_core::MotorState,
+    driver_report: Drv8323sConfigReport,
+    output_safety_status: OutputSafetyStatus,
+    bus_voltage_raw: u16,
+) {
+    let Some(packet) = debug_report::poll_text_api_request(request_sequence) else {
+        return;
+    };
+
+    let (status, response_len, response) = match core::str::from_utf8(packet.payload()) {
+        Ok(request) => {
+            let mut response = [0; TEXT_API_PAYLOAD_LEN];
+            match dispatch_firmware_text_api(
+                request,
+                &mut response,
+                benchmark_report,
+                controller_state,
+                driver_report,
+                output_safety_status,
+                bus_voltage_raw,
+            ) {
+                Ok(response_text) => (TextApiResponseStatus::Ok, response_text.len(), response),
+                Err(error) => (text_api_response_status(error), 0, response),
+            }
+        }
+        Err(_) => (
+            TextApiResponseStatus::InvalidUtf8,
+            0,
+            [0; TEXT_API_PAYLOAD_LEN],
+        ),
+    };
+
+    let packet = TextApiResponsePacket::new(packet.sequence, status, &response[..response_len])
+        .unwrap_or_else(|_| {
+            TextApiResponsePacket::new(packet.sequence, TextApiResponseStatus::ResponseTooLong, &[])
+                .unwrap()
+        });
+    debug_report::publish_text_api_response(packet);
+    core::hint::black_box((
+        debug_report::text_api_request_packet_ptr(),
+        debug_report::text_api_request_packet_len(),
+        debug_report::text_api_response_packet_ptr(),
+        debug_report::text_api_response_packet_len(),
+    ));
+}
+
+#[cfg(target_os = "none")]
+const TEXT_API_NAMES: [&str; TEXT_API_ENTRY_COUNT] = [
+    "max_fast_loop_cycles",
+    "max_fast_loop_period",
+    "fast_max_load_percent",
+    "fast_max_remaining_cycles",
+    "max_main_loop_cycles",
+    "max_main_loop_period",
+    "main_max_load_percent",
+    "main_max_remaining_cycles",
+    "combined_max_cycles",
+    "combined_max_load_percent",
+    "combined_max_remaining_cycles",
+    "mean_fast_loop_cycles",
+    "mean_fast_loop_period",
+    "mean_main_loop_cycles",
+    "mean_main_loop_period",
+    "combined_mean_cycles",
+    "combined_mean_load_percent",
+    "combined_mean_remaining_cycles",
+    "fault",
+    "torque_nm",
+    "velocity_rad_s",
+    "position_rad",
+    "output_allowed",
+    "command_blocked",
+    "bus_blocked",
+    "driver_not_enabled",
+    "driver_fault_latched",
+    "controller_faulted",
+    "host_timed_out",
+    "bus_voltage_raw",
+    "bus_voltage_volts",
+    "bus_allows_output",
+    "driver_configured",
+    "verify_error_mask",
+    "transfer_error_mask",
+    "status_before",
+    "status_after",
+];
+
+#[cfg(target_os = "none")]
+fn dispatch_firmware_text_api<'out>(
+    request: &str,
+    output: &'out mut [u8],
+    benchmark_report: BenchmarkReport,
+    controller_state: obot_core::MotorState,
+    driver_report: Drv8323sConfigReport,
+    output_safety_status: OutputSafetyStatus,
+    bus_voltage_raw: u16,
+) -> Result<&'out str, ApiDispatchError> {
+    match parse_request(request).map_err(ApiDispatchError::Parse)? {
+        ApiRequest::Get { name } => format_firmware_text_api_value(
+            name,
+            output,
+            benchmark_report,
+            controller_state,
+            driver_report,
+            output_safety_status,
+            bus_voltage_raw,
+        ),
+        ApiRequest::Set { name, .. } => {
+            if firmware_text_api_name_index(name).is_some() {
+                Err(ApiDispatchError::ReadOnly)
+            } else {
+                Err(ApiDispatchError::UnknownName)
+            }
+        }
+        ApiRequest::NameAt { index } => {
+            let name = TEXT_API_NAMES
+                .get(index as usize)
+                .ok_or(ApiDispatchError::NameIndexOutOfRange)?;
+            format_value(ApiValue::Str(name), output)
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+fn firmware_text_api_name_index(name: &str) -> Option<usize> {
+    TEXT_API_NAMES
+        .iter()
+        .position(|candidate| *candidate == name)
+}
+
+#[cfg(target_os = "none")]
+fn format_firmware_text_api_value<'out>(
+    name: &str,
+    output: &'out mut [u8],
+    benchmark_report: BenchmarkReport,
+    controller_state: obot_core::MotorState,
+    driver_report: Drv8323sConfigReport,
+    output_safety_status: OutputSafetyStatus,
+    bus_voltage_raw: u16,
+) -> Result<&'out str, ApiDispatchError> {
+    let combined_max_cycles = 5 * benchmark_report.max_fast_loop_cycles() as u64
+        + benchmark_report.max_main_loop_cycles() as u64;
+    let combined_mean_milli_cycles = 5 * benchmark_report.mean_fast_loop_cycles_milli_cycles()
+        + benchmark_report.mean_main_loop_cycles_milli_cycles();
+    let combined_mean_remaining_milli_cycles =
+        17_000_i64 * 1_000 - combined_mean_milli_cycles as i64;
+
+    let value = match name {
+        "max_fast_loop_cycles" => ApiValue::U32(benchmark_report.max_fast_loop_cycles()),
+        "max_fast_loop_period" => ApiValue::U32(benchmark_report.max_fast_loop_period_cycles()),
+        "fast_max_load_percent" => ApiValue::Fixed3(percent_milli(
+            benchmark_report.max_fast_loop_cycles() as u64,
+            benchmark_report.max_fast_loop_period_cycles() as u64,
+        )),
+        "fast_max_remaining_cycles" => ApiValue::I32(
+            benchmark_report.max_fast_loop_period_cycles() as i32
+                - benchmark_report.max_fast_loop_cycles() as i32,
+        ),
+        "max_main_loop_cycles" => ApiValue::U32(benchmark_report.max_main_loop_cycles()),
+        "max_main_loop_period" => ApiValue::U32(benchmark_report.max_main_loop_period_cycles()),
+        "main_max_load_percent" => ApiValue::Fixed3(percent_milli(
+            benchmark_report.max_main_loop_cycles() as u64,
+            benchmark_report.max_main_loop_period_cycles() as u64,
+        )),
+        "main_max_remaining_cycles" => ApiValue::I32(
+            benchmark_report.max_main_loop_period_cycles() as i32
+                - benchmark_report.max_main_loop_cycles() as i32,
+        ),
+        "combined_max_cycles" => ApiValue::U32(combined_max_cycles as u32),
+        "combined_max_load_percent" => ApiValue::Fixed3(percent_milli(combined_max_cycles, 17_000)),
+        "combined_max_remaining_cycles" => ApiValue::I32(17_000 - combined_max_cycles as i32),
+        "mean_fast_loop_cycles" => {
+            ApiValue::Fixed3(benchmark_report.mean_fast_loop_cycles_milli_cycles() as i64)
+        }
+        "mean_fast_loop_period" => {
+            ApiValue::Fixed3(benchmark_report.mean_fast_loop_period_milli_cycles() as i64)
+        }
+        "mean_main_loop_cycles" => {
+            ApiValue::Fixed3(benchmark_report.mean_main_loop_cycles_milli_cycles() as i64)
+        }
+        "mean_main_loop_period" => {
+            ApiValue::Fixed3(benchmark_report.mean_main_loop_period_milli_cycles() as i64)
+        }
+        "combined_mean_cycles" => ApiValue::Fixed3(combined_mean_milli_cycles as i64),
+        "combined_mean_load_percent" => {
+            ApiValue::Fixed3(milli_percent_milli(combined_mean_milli_cycles, 17_000))
+        }
+        "combined_mean_remaining_cycles" => ApiValue::Fixed3(combined_mean_remaining_milli_cycles),
+        "fault" => ApiValue::Str(fault_name(controller_state.fault)),
+        "torque_nm" => ApiValue::Fixed3((controller_state.torque_nm * 1_000.0) as i64),
+        "velocity_rad_s" => ApiValue::Fixed3((controller_state.velocity_rad_s * 1_000.0) as i64),
+        "position_rad" => ApiValue::Fixed3((controller_state.position_rad * 1_000.0) as i64),
+        "output_allowed" => ApiValue::Bool(output_safety_status.output_allowed),
+        "command_blocked" => ApiValue::Bool(output_safety_status.command_blocked),
+        "bus_blocked" => ApiValue::Bool(output_safety_status.bus_blocked),
+        "driver_not_enabled" => ApiValue::Bool(output_safety_status.driver_not_enabled),
+        "driver_fault_latched" => ApiValue::Bool(output_safety_status.driver_fault_latched),
+        "controller_faulted" => ApiValue::Bool(output_safety_status.controller_faulted),
+        "host_timed_out" => ApiValue::Bool(output_safety_status.host_timed_out),
+        "bus_voltage_raw" => ApiValue::U16(bus_voltage_raw),
+        "bus_voltage_volts" => ApiValue::Fixed3(bus_voltage_millivolts(bus_voltage_raw)),
+        "bus_allows_output" => {
+            ApiValue::Bool(OutputGate::MOTOR_HALL.allows_output_raw(bus_voltage_raw))
+        }
+        "driver_configured" => ApiValue::Bool(driver_report.configured()),
+        "verify_error_mask" => ApiValue::U16(driver_report.verify_error_mask),
+        "transfer_error_mask" => ApiValue::U16(driver_report.transfer_error_mask),
+        "status_before" => ApiValue::U32(
+            driver_report
+                .status_before
+                .map_or(0, |status| status.as_u32()),
+        ),
+        "status_after" => ApiValue::U32(
+            driver_report
+                .status_after
+                .map_or(0, |status| status.as_u32()),
+        ),
+        _ => return Err(ApiDispatchError::UnknownName),
+    };
+
+    format_value(value, output)
+}
+
+#[cfg(target_os = "none")]
+fn text_api_response_status(error: ApiDispatchError) -> TextApiResponseStatus {
+    match error {
+        ApiDispatchError::Parse(_) => TextApiResponseStatus::ParseError,
+        ApiDispatchError::UnknownName => TextApiResponseStatus::UnknownName,
+        ApiDispatchError::ReadOnly => TextApiResponseStatus::ReadOnly,
+        ApiDispatchError::NameIndexOutOfRange => TextApiResponseStatus::NameIndexOutOfRange,
+        ApiDispatchError::ResponseTooLong => TextApiResponseStatus::ResponseTooLong,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn fault_name(fault: Option<obot_core::Fault>) -> &'static str {
+    match fault {
+        None => "none",
+        Some(obot_core::Fault::CommandNotFinite) => "command_not_finite",
+        Some(obot_core::Fault::TorqueLimit) => "torque_limit",
+        Some(obot_core::Fault::VelocityLimit) => "velocity_limit",
+        Some(obot_core::Fault::PositionLimit) => "position_limit",
+    }
+}
+
+#[cfg(target_os = "none")]
+fn percent_milli(numerator_cycles: u64, denominator_cycles: u64) -> i64 {
+    if denominator_cycles == 0 {
+        return 0;
+    }
+
+    (numerator_cycles.saturating_mul(100_000) / denominator_cycles) as i64
+}
+
+#[cfg(target_os = "none")]
+fn milli_percent_milli(numerator_milli_cycles: u64, denominator_cycles: u64) -> i64 {
+    if denominator_cycles == 0 {
+        return 0;
+    }
+
+    (numerator_milli_cycles.saturating_mul(100) / denominator_cycles) as i64
+}
+
+#[cfg(target_os = "none")]
+fn bus_voltage_millivolts(raw: u16) -> i64 {
+    raw as i64 * 8_000 / OutputGate::MOTOR_HALL.min_raw as i64
+}
+
+#[cfg(target_os = "none")]
 #[cold]
 #[inline(never)]
 fn service_driver_debug(
@@ -262,10 +553,8 @@ fn service_driver_debug(
     cycle_counter: &impl CycleCounter,
     command_sequence: &mut u8,
     report_sequence: &mut u8,
-) -> bool {
-    let Some(packet) = debug_report::poll_driver_command(command_sequence) else {
-        return false;
-    };
+) -> Option<Drv8323sConfigReport> {
+    let packet = debug_report::poll_driver_command(command_sequence)?;
 
     let report = match packet.command {
         DriverCommand::Disable => {
@@ -286,7 +575,7 @@ fn service_driver_debug(
     publish_driver_report(*report_sequence, report);
     *report_sequence = (*report_sequence).wrapping_add(1);
     core::hint::black_box((packet.command, report.configured()));
-    true
+    Some(report)
 }
 
 #[cfg(target_os = "none")]

@@ -13,7 +13,8 @@ use obot_protocol::{
     BENCHMARK_PACKET_LEN, BUS_VOLTAGE_PACKET_LEN, BenchmarkPacket, BusVoltagePacket,
     CommandPacket, DRIVER_REPORT_PACKET_LEN, DriverCommand, DriverCommandPacket,
     DriverReportPacket, OUTPUT_SAFETY_PACKET_LEN, OutputSafetyPacket, STATUS_PACKET_LEN,
-    StatusPacket,
+    StatusPacket, TEXT_API_RESPONSE_PACKET_LEN, TextApiRequestPacket, TextApiResponsePacket,
+    TextApiResponseStatus,
 };
 
 const DEFAULT_NAME: &str = "rust_debug";
@@ -32,6 +33,9 @@ const DRIVER_COMMAND_SEQUENCE_SYMBOL: &str = "OBOT_DRIVER_COMMAND_PACKET_SEQUENC
 const DRIVER_REPORT_PACKET_SYMBOL: &str = "OBOT_DRIVER_REPORT_PACKET";
 const OUTPUT_SAFETY_PACKET_SYMBOL: &str = "OBOT_OUTPUT_SAFETY_PACKET";
 const STATUS_PACKET_SYMBOL: &str = "OBOT_STATUS_PACKET";
+const TEXT_API_REQUEST_PACKET_SYMBOL: &str = "OBOT_TEXT_API_REQUEST_PACKET";
+const TEXT_API_REQUEST_SEQUENCE_SYMBOL: &str = "OBOT_TEXT_API_REQUEST_PACKET_SEQUENCE";
+const TEXT_API_RESPONSE_PACKET_SYMBOL: &str = "OBOT_TEXT_API_RESPONSE_PACKET";
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -61,6 +65,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "decode-driver-hex" => decode_driver_hex_command(rest),
         "decode-output-safety-hex" => decode_output_safety_hex_command(rest),
         "decode-bus-voltage-hex" => decode_bus_voltage_hex_command(rest),
+        "decode-text-api-response-hex" => decode_text_api_response_hex_command(rest),
         "read-jlink" => read_jlink_command(rest),
         "read-jlink-detail" => read_jlink_detail_command(rest),
         "run-stats-jlink" => run_stats_jlink_command(rest),
@@ -70,6 +75,8 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "read-bus-voltage-jlink" => read_bus_voltage_jlink_command(rest),
         "snapshot-jlink" => snapshot_jlink_command(rest),
         "api-snapshot-jlink" => api_snapshot_jlink_command(rest),
+        "read-text-api-response-jlink" => read_text_api_response_jlink_command(rest),
+        "write-text-api-request-jlink" => write_text_api_request_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
         "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
         "jlink-script" => jlink_script_command(rest),
@@ -156,6 +163,15 @@ fn decode_bus_voltage_hex_command(args: &[String]) -> Result<String, String> {
     decode_bus_voltage_csv(&bytes)
 }
 
+fn decode_text_api_response_hex_command(args: &[String]) -> Result<String, String> {
+    if args.is_empty() {
+        return Err("decode-text-api-response-hex requires packet bytes".to_string());
+    }
+
+    let bytes = parse_hex_bytes(&args.join(" "))?;
+    decode_text_api_response_csv(&bytes)
+}
+
 fn read_jlink_command(args: &[String]) -> Result<String, String> {
     let options = JlinkOptions::parse(args)?;
     let bytes = read_jlink_bytes(&options, BENCHMARK_PACKET_LEN)?;
@@ -201,6 +217,13 @@ fn read_bus_voltage_jlink_command(args: &[String]) -> Result<String, String> {
     let jlink = options.resolve(BUS_VOLTAGE_PACKET_SYMBOL)?;
     let bytes = read_jlink_bytes(&jlink, BUS_VOLTAGE_PACKET_LEN)?;
     decode_bus_voltage_csv(&bytes)
+}
+
+fn read_text_api_response_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = SymbolReadOptions::parse(args)?;
+    let jlink = options.resolve(TEXT_API_RESPONSE_PACKET_SYMBOL)?;
+    let bytes = read_jlink_bytes(&jlink, TEXT_API_RESPONSE_PACKET_LEN)?;
+    decode_text_api_response_csv(&bytes)
 }
 
 fn snapshot_jlink_command(args: &[String]) -> Result<String, String> {
@@ -373,6 +396,42 @@ fn write_driver_command_jlink_command(args: &[String]) -> Result<String, String>
     Ok(format!(
         "wrote driver command sequence {} command {:?}\n",
         options.sequence, options.command
+    ))
+}
+
+fn write_text_api_request_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = TextApiRequestWriteOptions::parse(args)?.resolve()?;
+    let packet = TextApiRequestPacket::new(options.sequence, &options.request)
+        .map_err(|error| format!("invalid text API request: {error:?}"))?;
+    let encoded = packet.encode();
+    let script = jlink_write_raw_packet_script(
+        &options.jlink,
+        options.packet_address,
+        options.sequence_address,
+        options.sequence,
+        &encoded,
+    );
+    let script_path = write_temp_script(&script)?;
+    let output = Command::new("JLinkExe")
+        .arg("-CommanderScript")
+        .arg(&script_path)
+        .output()
+        .map_err(|error| format!("failed to run JLinkExe: {error}"));
+    let _ = fs::remove_file(&script_path);
+    let output = output?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "JLinkExe failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status, stdout, stderr
+        ));
+    }
+
+    Ok(format!(
+        "wrote text API request sequence {} request {}\n",
+        options.sequence, options.request
     ))
 }
 
@@ -602,6 +661,119 @@ struct ResolvedDriverCommandWriteOptions {
     sequence_address: u32,
     sequence: u8,
     command: DriverCommand,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TextApiRequestWriteOptions {
+    jlink: JlinkOptions,
+    packet_address: Option<u32>,
+    sequence_address: Option<u32>,
+    elf_path: PathBuf,
+    sequence: u8,
+    request: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ResolvedTextApiRequestWriteOptions {
+    jlink: JlinkOptions,
+    packet_address: u32,
+    sequence_address: u32,
+    sequence: u8,
+    request: String,
+}
+
+impl TextApiRequestWriteOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            jlink: JlinkOptions {
+                address: DEFAULT_ADDRESS,
+                speed_khz: DEFAULT_SPEED_KHZ,
+                device: DEFAULT_DEVICE,
+            },
+            packet_address: None,
+            sequence_address: None,
+            elf_path: PathBuf::from(DEFAULT_ELF_PATH),
+            sequence: 1,
+            request: String::new(),
+        };
+
+        let mut request = None;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--packet-address" => {
+                    index += 1;
+                    options.packet_address = Some(parse_u32_arg(args.get(index), "--packet-address")?);
+                }
+                "--sequence-address" => {
+                    index += 1;
+                    options.sequence_address =
+                        Some(parse_u32_arg(args.get(index), "--sequence-address")?);
+                }
+                "--elf" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--elf requires a value".to_string())?;
+                    options.elf_path = PathBuf::from(path);
+                }
+                "--sequence" => {
+                    index += 1;
+                    let sequence = parse_u32_arg(args.get(index), "--sequence")?;
+                    options.sequence = sequence
+                        .try_into()
+                        .map_err(|_| "--sequence must fit in u8".to_string())?;
+                }
+                "--speed" => {
+                    index += 1;
+                    options.jlink.speed_khz = parse_u32_arg(args.get(index), "--speed")?;
+                }
+                "--device" => {
+                    index += 1;
+                    let device = args
+                        .get(index)
+                        .ok_or_else(|| "--device requires a value".to_string())?;
+                    if device != DEFAULT_DEVICE {
+                        return Err(format!(
+                            "unsupported device `{device}`; this helper currently supports `{DEFAULT_DEVICE}`"
+                        ));
+                    }
+                }
+                value => {
+                    if request.is_some() {
+                        return Err(format!("unexpected extra request argument `{value}`"));
+                    }
+                    request = Some(value.to_string());
+                }
+            }
+            index += 1;
+        }
+
+        options.request = request
+            .ok_or_else(|| "write-text-api-request-jlink requires an API request".to_string())?;
+        Ok(options)
+    }
+
+    fn resolve(self) -> Result<ResolvedTextApiRequestWriteOptions, String> {
+        let packet_address = resolve_optional_symbol_address(
+            self.packet_address,
+            &self.elf_path,
+            TEXT_API_REQUEST_PACKET_SYMBOL,
+        )?;
+        let sequence_address = resolve_optional_symbol_address(
+            self.sequence_address,
+            &self.elf_path,
+            TEXT_API_REQUEST_SEQUENCE_SYMBOL,
+        )?;
+
+        Ok(ResolvedTextApiRequestWriteOptions {
+            jlink: self.jlink,
+            packet_address,
+            sequence_address,
+            sequence: self.sequence,
+            request: self.request,
+        })
+    }
 }
 
 impl DriverCommandWriteOptions {
@@ -1040,6 +1212,11 @@ fn decode_bus_voltage_csv(bytes: &[u8]) -> Result<String, String> {
     Ok(format_bus_voltage_csv(DEFAULT_NAME, packet))
 }
 
+fn decode_text_api_response_csv(bytes: &[u8]) -> Result<String, String> {
+    let packet = decode_text_api_response_packet(bytes)?;
+    Ok(format_text_api_response_csv(DEFAULT_NAME, packet))
+}
+
 fn decode_status_packet(bytes: &[u8]) -> Result<StatusPacket, String> {
     if bytes.len() != STATUS_PACKET_LEN {
         return Err(format!(
@@ -1086,6 +1263,18 @@ fn decode_bus_voltage_packet(bytes: &[u8]) -> Result<BusVoltagePacket, String> {
     }
 
     BusVoltagePacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
+}
+
+fn decode_text_api_response_packet(bytes: &[u8]) -> Result<TextApiResponsePacket, String> {
+    if bytes.len() != TEXT_API_RESPONSE_PACKET_LEN {
+        return Err(format!(
+            "expected {} text API response bytes, got {}",
+            TEXT_API_RESPONSE_PACKET_LEN,
+            bytes.len()
+        ));
+    }
+
+    TextApiResponsePacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1398,6 +1587,29 @@ fn format_bus_voltage_csv(name: &str, packet: BusVoltagePacket) -> String {
     )
 }
 
+fn format_text_api_response_csv(name: &str, packet: TextApiResponsePacket) -> String {
+    let response = std::str::from_utf8(packet.payload()).unwrap_or("<invalid-utf8>");
+    format!(
+        "name, sequence, status, response\n{}, {}, {}, {}\n",
+        name,
+        packet.sequence,
+        format_text_api_status(packet.status),
+        response,
+    )
+}
+
+fn format_text_api_status(status: TextApiResponseStatus) -> &'static str {
+    match status {
+        TextApiResponseStatus::Ok => "ok",
+        TextApiResponseStatus::ParseError => "parse_error",
+        TextApiResponseStatus::UnknownName => "unknown_name",
+        TextApiResponseStatus::ReadOnly => "read_only",
+        TextApiResponseStatus::NameIndexOutOfRange => "name_index_out_of_range",
+        TextApiResponseStatus::ResponseTooLong => "response_too_long",
+        TextApiResponseStatus::InvalidUtf8 => "invalid_utf8",
+    }
+}
+
 fn format_fault(fault: Option<obot_core::Fault>) -> &'static str {
     match fault {
         None => "none",
@@ -1574,6 +1786,7 @@ fn usage() -> String {
   obot-bench-debug decode-driver-hex <{} driver report bytes as hex>
   obot-bench-debug decode-output-safety-hex <{} output safety bytes as hex>
   obot-bench-debug decode-bus-voltage-hex <{} bus voltage bytes as hex>
+  obot-bench-debug decode-text-api-response-hex <{} text API response bytes as hex>
   obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
@@ -1584,6 +1797,8 @@ fn usage() -> String {
   obot-bench-debug read-bus-voltage-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <bus-voltage-address>] [--speed 4000]
   obot-bench-debug snapshot-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--speed 4000]
   obot-bench-debug api-snapshot-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--speed 4000] <api-request>
+  obot-bench-debug write-text-api-request-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <text-api-request-address>] [--sequence-address <text-api-request-sequence-address>] [--sequence N] <api-request>
+  obot-bench-debug read-text-api-response-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <text-api-response-address>] [--speed 4000]
   obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
 ",
@@ -1594,7 +1809,8 @@ fn usage() -> String {
         STATUS_PACKET_LEN,
         DRIVER_REPORT_PACKET_LEN,
         OUTPUT_SAFETY_PACKET_LEN,
-        BUS_VOLTAGE_PACKET_LEN
+        BUS_VOLTAGE_PACKET_LEN,
+        TEXT_API_RESPONSE_PACKET_LEN
     )
 }
 
@@ -1832,6 +2048,19 @@ mod tests {
     }
 
     #[test]
+    fn formats_text_api_response_csv() {
+        let output = format_text_api_response_csv(
+            "rust",
+            TextApiResponsePacket::new(7, TextApiResponseStatus::Ok, b"435.633").unwrap(),
+        );
+
+        assert_eq!(
+            output,
+            "name, sequence, status, response\nrust, 7, ok, 435.633\n"
+        );
+    }
+
+    #[test]
     fn formats_combined_snapshot_csv() {
         let output = format_snapshot_csv(
             "rust",
@@ -1987,6 +2216,25 @@ mod tests {
         assert_eq!(options.sequence_address, Some(0x2000_0092));
         assert_eq!(options.sequence, 8);
         assert_eq!(options.command, DriverCommand::ConfigureEnable);
+    }
+
+    #[test]
+    fn parses_text_api_request_write_options() {
+        let options = TextApiRequestWriteOptions::parse(&[
+            "--packet-address".to_string(),
+            "0x20000090".to_string(),
+            "--sequence-address".to_string(),
+            "0x200000d2".to_string(),
+            "--sequence".to_string(),
+            "9".to_string(),
+            "mean_fast_loop_cycles".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.packet_address, Some(0x2000_0090));
+        assert_eq!(options.sequence_address, Some(0x2000_00d2));
+        assert_eq!(options.sequence, 9);
+        assert_eq!(options.request, "mean_fast_loop_cycles");
     }
 
     #[test]

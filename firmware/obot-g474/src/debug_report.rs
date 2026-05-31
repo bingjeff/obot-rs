@@ -4,7 +4,8 @@ use obot_protocol::{
     BENCHMARK_PACKET_LEN, BUS_VOLTAGE_PACKET_LEN, BenchmarkPacket, BusVoltagePacket,
     COMMAND_PACKET_LEN, CommandPacket, DRIVER_COMMAND_PACKET_LEN, DRIVER_REPORT_PACKET_LEN,
     DriverCommandPacket, DriverReportPacket, OUTPUT_SAFETY_PACKET_LEN, OutputSafetyPacket,
-    STATUS_PACKET_LEN, StatusPacket,
+    STATUS_PACKET_LEN, StatusPacket, TEXT_API_REQUEST_PACKET_LEN, TEXT_API_RESPONSE_PACKET_LEN,
+    TextApiRequestPacket, TextApiResponsePacket,
 };
 
 #[unsafe(no_mangle)]
@@ -65,6 +66,24 @@ pub static mut OBOT_BUS_VOLTAGE_PACKET: [u8; BUS_VOLTAGE_PACKET_LEN] = [0; BUS_V
 #[unsafe(no_mangle)]
 #[used]
 pub static mut OBOT_BUS_VOLTAGE_PACKET_SEQUENCE: u8 = 0;
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_TEXT_API_REQUEST_PACKET: [u8; TEXT_API_REQUEST_PACKET_LEN] =
+    [0; TEXT_API_REQUEST_PACKET_LEN];
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_TEXT_API_REQUEST_PACKET_SEQUENCE: u8 = 0;
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_TEXT_API_RESPONSE_PACKET: [u8; TEXT_API_RESPONSE_PACKET_LEN] =
+    [0; TEXT_API_RESPONSE_PACKET_LEN];
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_TEXT_API_RESPONSE_PACKET_SEQUENCE: u8 = 0;
 
 pub fn publish(packet: BenchmarkPacket) {
     let encoded = packet.encode();
@@ -138,12 +157,42 @@ pub fn poll_driver_command(last_sequence: &mut u8) -> Option<DriverCommandPacket
     }
 }
 
+pub fn poll_text_api_request(last_sequence: &mut u8) -> Option<TextApiRequestPacket> {
+    let sequence = unsafe { read_volatile(addr_of!(OBOT_TEXT_API_REQUEST_PACKET_SEQUENCE)) };
+    if sequence == *last_sequence {
+        return None;
+    }
+
+    let src = addr_of!(OBOT_TEXT_API_REQUEST_PACKET).cast::<u8>();
+    let mut bytes = [0; TEXT_API_REQUEST_PACKET_LEN];
+    for (offset, byte) in bytes.iter_mut().enumerate() {
+        *byte = unsafe { read_volatile(src.add(offset)) };
+    }
+
+    match TextApiRequestPacket::decode(&bytes) {
+        Ok(packet) if packet.sequence == sequence => {
+            clear_text_api_request_sequence();
+            *last_sequence = 0;
+            Some(packet)
+        }
+        Ok(_) | Err(_) => {
+            clear_text_api_request_sequence();
+            *last_sequence = 0;
+            None
+        }
+    }
+}
+
 fn clear_command_sequence() {
     unsafe { write_volatile(addr_of_mut!(OBOT_COMMAND_PACKET_SEQUENCE), 0) };
 }
 
 fn clear_driver_command_sequence() {
     unsafe { write_volatile(addr_of_mut!(OBOT_DRIVER_COMMAND_PACKET_SEQUENCE), 0) };
+}
+
+fn clear_text_api_request_sequence() {
+    unsafe { write_volatile(addr_of_mut!(OBOT_TEXT_API_REQUEST_PACKET_SEQUENCE), 0) };
 }
 
 pub fn publish_status(packet: StatusPacket) {
@@ -217,6 +266,24 @@ pub fn publish_bus_voltage(packet: BusVoltagePacket) {
     }
 }
 
+pub fn publish_text_api_response(packet: TextApiResponsePacket) {
+    let encoded = packet.encode();
+    let dest = addr_of_mut!(OBOT_TEXT_API_RESPONSE_PACKET).cast::<u8>();
+
+    for (offset, byte) in encoded.iter().copied().enumerate() {
+        // SAFETY: `dest` points to the exported text API response storage.
+        unsafe { write_volatile(dest.add(offset), byte) };
+    }
+
+    // SAFETY: This writes the exported sequence byte after the packet bytes.
+    unsafe {
+        write_volatile(
+            addr_of_mut!(OBOT_TEXT_API_RESPONSE_PACKET_SEQUENCE),
+            packet.sequence,
+        );
+    }
+}
+
 pub fn packet_ptr() -> *const u8 {
     addr_of!(OBOT_BENCHMARK_PACKET).cast::<u8>()
 }
@@ -271,4 +338,20 @@ pub fn bus_voltage_packet_ptr() -> *const u8 {
 
 pub const fn bus_voltage_packet_len() -> usize {
     BUS_VOLTAGE_PACKET_LEN
+}
+
+pub fn text_api_request_packet_ptr() -> *const u8 {
+    addr_of!(OBOT_TEXT_API_REQUEST_PACKET).cast::<u8>()
+}
+
+pub const fn text_api_request_packet_len() -> usize {
+    TEXT_API_REQUEST_PACKET_LEN
+}
+
+pub fn text_api_response_packet_ptr() -> *const u8 {
+    addr_of!(OBOT_TEXT_API_RESPONSE_PACKET).cast::<u8>()
+}
+
+pub const fn text_api_response_packet_len() -> usize {
+    TEXT_API_RESPONSE_PACKET_LEN
 }

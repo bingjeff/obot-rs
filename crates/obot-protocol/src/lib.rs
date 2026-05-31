@@ -13,6 +13,9 @@ pub const DRIVER_REPORT_PACKET_LEN: usize = 14;
 pub const OUTPUT_SAFETY_PACKET_LEN: usize = 2;
 pub const BUS_VOLTAGE_PACKET_LEN: usize = 3;
 pub const BENCHMARK_PACKET_LEN: usize = 81;
+pub const TEXT_API_PAYLOAD_LEN: usize = 64;
+pub const TEXT_API_REQUEST_PACKET_LEN: usize = 2 + TEXT_API_PAYLOAD_LEN;
+pub const TEXT_API_RESPONSE_PACKET_LEN: usize = 3 + TEXT_API_PAYLOAD_LEN;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodeError {
@@ -21,6 +24,19 @@ pub enum DecodeError {
     InvalidFault,
     InvalidDriverCommand,
     InvalidOutputSafetyFlags,
+    InvalidTextApiLength,
+    InvalidTextApiStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextApiResponseStatus {
+    Ok,
+    ParseError,
+    UnknownName,
+    ReadOnly,
+    NameIndexOutOfRange,
+    ResponseTooLong,
+    InvalidUtf8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -201,6 +217,116 @@ impl BusVoltagePacket {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TextApiRequestPacket {
+    pub sequence: u8,
+    pub len: u8,
+    pub payload: [u8; TEXT_API_PAYLOAD_LEN],
+}
+
+impl TextApiRequestPacket {
+    pub fn new(sequence: u8, request: &str) -> Result<Self, DecodeError> {
+        if request.len() > TEXT_API_PAYLOAD_LEN {
+            return Err(DecodeError::InvalidTextApiLength);
+        }
+
+        let mut payload = [0; TEXT_API_PAYLOAD_LEN];
+        payload[..request.len()].copy_from_slice(request.as_bytes());
+        Ok(Self {
+            sequence,
+            len: request.len() as u8,
+            payload,
+        })
+    }
+
+    pub fn encode(self) -> [u8; TEXT_API_REQUEST_PACKET_LEN] {
+        let mut out = [0; TEXT_API_REQUEST_PACKET_LEN];
+        out[0] = self.sequence;
+        out[1] = self.len;
+        out[2..].copy_from_slice(&self.payload);
+        out
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let bytes: &[u8; TEXT_API_REQUEST_PACKET_LEN] =
+            input.try_into().map_err(|_| DecodeError::InvalidLength)?;
+        if bytes[1] as usize > TEXT_API_PAYLOAD_LEN {
+            return Err(DecodeError::InvalidTextApiLength);
+        }
+
+        let mut payload = [0; TEXT_API_PAYLOAD_LEN];
+        payload.copy_from_slice(&bytes[2..]);
+        Ok(Self {
+            sequence: bytes[0],
+            len: bytes[1],
+            payload,
+        })
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload[..self.len as usize]
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TextApiResponsePacket {
+    pub sequence: u8,
+    pub status: TextApiResponseStatus,
+    pub len: u8,
+    pub payload: [u8; TEXT_API_PAYLOAD_LEN],
+}
+
+impl TextApiResponsePacket {
+    pub fn new(
+        sequence: u8,
+        status: TextApiResponseStatus,
+        response: &[u8],
+    ) -> Result<Self, DecodeError> {
+        if response.len() > TEXT_API_PAYLOAD_LEN {
+            return Err(DecodeError::InvalidTextApiLength);
+        }
+
+        let mut payload = [0; TEXT_API_PAYLOAD_LEN];
+        payload[..response.len()].copy_from_slice(response);
+        Ok(Self {
+            sequence,
+            status,
+            len: response.len() as u8,
+            payload,
+        })
+    }
+
+    pub fn encode(self) -> [u8; TEXT_API_RESPONSE_PACKET_LEN] {
+        let mut out = [0; TEXT_API_RESPONSE_PACKET_LEN];
+        out[0] = self.sequence;
+        out[1] = text_api_status_to_u8(self.status);
+        out[2] = self.len;
+        out[3..].copy_from_slice(&self.payload);
+        out
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let bytes: &[u8; TEXT_API_RESPONSE_PACKET_LEN] =
+            input.try_into().map_err(|_| DecodeError::InvalidLength)?;
+        if bytes[2] as usize > TEXT_API_PAYLOAD_LEN {
+            return Err(DecodeError::InvalidTextApiLength);
+        }
+
+        let mut payload = [0; TEXT_API_PAYLOAD_LEN];
+        payload.copy_from_slice(&bytes[3..]);
+        Ok(Self {
+            sequence: bytes[0],
+            status: text_api_status_from_u8(bytes[1])?,
+            len: bytes[2],
+            payload,
+        })
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload[..self.len as usize]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BenchmarkPacket {
     pub sequence: u8,
@@ -371,6 +497,31 @@ const fn driver_command_from_u8(value: u8) -> Result<DriverCommand, DecodeError>
     }
 }
 
+const fn text_api_status_to_u8(status: TextApiResponseStatus) -> u8 {
+    match status {
+        TextApiResponseStatus::Ok => 0,
+        TextApiResponseStatus::ParseError => 1,
+        TextApiResponseStatus::UnknownName => 2,
+        TextApiResponseStatus::ReadOnly => 3,
+        TextApiResponseStatus::NameIndexOutOfRange => 4,
+        TextApiResponseStatus::ResponseTooLong => 5,
+        TextApiResponseStatus::InvalidUtf8 => 6,
+    }
+}
+
+const fn text_api_status_from_u8(value: u8) -> Result<TextApiResponseStatus, DecodeError> {
+    match value {
+        0 => Ok(TextApiResponseStatus::Ok),
+        1 => Ok(TextApiResponseStatus::ParseError),
+        2 => Ok(TextApiResponseStatus::UnknownName),
+        3 => Ok(TextApiResponseStatus::ReadOnly),
+        4 => Ok(TextApiResponseStatus::NameIndexOutOfRange),
+        5 => Ok(TextApiResponseStatus::ResponseTooLong),
+        6 => Ok(TextApiResponseStatus::InvalidUtf8),
+        _ => Err(DecodeError::InvalidTextApiStatus),
+    }
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -482,6 +633,56 @@ mod tests {
 
         assert_eq!(packet.encode(), [4, 0xAB, 0x07]);
         assert_eq!(BusVoltagePacket::decode(&packet.encode()).unwrap(), packet);
+    }
+
+    #[test]
+    fn text_api_request_packet_round_trips() {
+        let packet = TextApiRequestPacket::new(7, "mean_fast_loop_cycles").unwrap();
+        let encoded = packet.encode();
+
+        assert_eq!(encoded[0], 7);
+        assert_eq!(encoded[1], 21);
+        assert_eq!(&encoded[2..23], b"mean_fast_loop_cycles");
+        assert_eq!(TextApiRequestPacket::decode(&encoded).unwrap(), packet);
+        assert_eq!(packet.payload(), b"mean_fast_loop_cycles");
+    }
+
+    #[test]
+    fn text_api_response_packet_round_trips() {
+        let packet = TextApiResponsePacket::new(8, TextApiResponseStatus::Ok, b"435.633").unwrap();
+        let encoded = packet.encode();
+
+        assert_eq!(encoded[0], 8);
+        assert_eq!(encoded[1], 0);
+        assert_eq!(encoded[2], 7);
+        assert_eq!(&encoded[3..10], b"435.633");
+        assert_eq!(TextApiResponsePacket::decode(&encoded).unwrap(), packet);
+        assert_eq!(packet.payload(), b"435.633");
+    }
+
+    #[test]
+    fn rejects_oversized_text_api_payloads() {
+        let oversized = [b'x'; TEXT_API_PAYLOAD_LEN + 1];
+
+        assert_eq!(
+            TextApiRequestPacket::new(1, core::str::from_utf8(&oversized).unwrap()).unwrap_err(),
+            DecodeError::InvalidTextApiLength
+        );
+        assert_eq!(
+            TextApiResponsePacket::new(1, TextApiResponseStatus::Ok, &oversized).unwrap_err(),
+            DecodeError::InvalidTextApiLength
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_text_api_response_status() {
+        let mut bytes = [0; TEXT_API_RESPONSE_PACKET_LEN];
+        bytes[1] = 99;
+
+        assert_eq!(
+            TextApiResponsePacket::decode(&bytes).unwrap_err(),
+            DecodeError::InvalidTextApiStatus
+        );
     }
 
     #[test]
