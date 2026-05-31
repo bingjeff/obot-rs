@@ -356,3 +356,58 @@ Interpretation at 170 MHz:
 Comparison caveat:
 
 This is the current best Rust FOC subset result, but it is still not feature-equivalent to C++ `motor_hall`. The hot path still uses a fixed zero electrical angle and does not apply commanded voltage to PWM outputs.
+
+
+## 2026-05-31: Inlined Zero-Command FOC Surface, J-Link Debug Readout
+
+Firmware commit: `681368e Inline FOC hot path`
+
+Change under test:
+
+- Added `#[inline(always)]` to the FOC hot-path methods in `obot-core` after `llvm-nm -C` showed `FocController::step_with_sincos` remained a standalone cross-crate symbol in the release firmware.
+- Rebuilt release firmware and verified the standalone FOC step symbol disappeared from the image.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+llvm-nm -C target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+Release artifact sizes:
+
+```text
+133496 target/thumbv7em-none-eabihf/release/obot-g474
+  9644 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+Flash result:
+
+```text
+J-Link: Flash download: Bank 0 @ 0x08000000: 1 range affected (10240 bytes)
+J-Link: Flash download: Program & Verify speed: 77 KB/s
+O.K.
+```
+
+Representative readout after flashing:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 836, 3460, 119, 17008, 397.095, 3399.13, 118.798, 16971.1
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `397.095 cycles = 2.336 us`.
+- Main-loop mean execution: `118.798 cycles = 0.699 us`.
+- Combined 100 us max load: `(5 * 836 + 119) / 17000 = 25.29%`.
+- Combined 100 us mean load: `(5 * 397.095 + 118.798) / 17000 = 12.38%`.
+- Improvement versus the copy-reduced FOC benchmark: `955.19 - 397.095 = 558.095 cycles = 3.283 us` mean fast-loop savings.
+- Incremental mean fast-loop cost over current conversion: `397.095 - 173.259 = 223.836 cycles = 1.317 us`.
+
+Comparison caveat:
+
+This is the current best Rust FOC subset result. Its mean fast-loop cost is now below the recorded C++ full fast-loop mean (`397.095` cycles Rust subset versus `708.965` cycles C++ baseline), but it remains not feature-equivalent because the Rust path still uses a fixed zero electrical angle and does not apply voltage commands to PWM outputs. The observed max sample (`836` cycles) is still higher than the C++ max fast-loop sample (`710` cycles), so max-latency variance remains worth tracking as functionality is added.
