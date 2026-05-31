@@ -35,9 +35,9 @@ pub struct OutputGate {
 
 impl OutputGate {
     pub const MOTOR_HALL: Self = Self {
-        min_vbus_v: 10.0,
+        min_vbus_v: 8.0,
         max_vbus_v: 60.0,
-        min_raw: 2_454,
+        min_raw: 1_963,
         max_raw: 14_721,
     };
 
@@ -88,11 +88,11 @@ mod tests {
         let gate = OutputGate::MOTOR_HALL;
         assert!(!gate.allows_output(BusVoltageSample {
             raw: 0,
-            volts: 9.99
+            volts: 7.99
         }));
         assert!(gate.allows_output(BusVoltageSample {
             raw: 0,
-            volts: 10.0
+            volts: 8.0
         }));
         assert!(gate.allows_output(BusVoltageSample {
             raw: 0,
@@ -129,9 +129,9 @@ mod tests {
             gate.gate_voltages(command, BusVoltageSample { raw: 0, volts: 0.0 }),
             FocVoltages::default()
         );
-        assert_eq!(gate.gate_voltages_raw(command, 2_454), command);
+        assert_eq!(gate.gate_voltages_raw(command, 1_963), command);
         assert_eq!(
-            gate.gate_voltages_raw(command, 2_453),
+            gate.gate_voltages_raw(command, 1_962),
             FocVoltages::default()
         );
     }
