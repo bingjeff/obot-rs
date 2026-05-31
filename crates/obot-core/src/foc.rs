@@ -78,7 +78,6 @@ pub struct FirstOrderLowPassFilter {
     dt: f32,
     alpha: f32,
     value: f32,
-    last_value: f32,
 }
 
 impl FirstOrderLowPassFilter {
@@ -87,7 +86,6 @@ impl FirstOrderLowPassFilter {
             dt,
             alpha: 1.0,
             value: 0.0,
-            last_value: 0.0,
         };
         filter.set_frequency(frequency_hz);
         filter
@@ -96,13 +94,11 @@ impl FirstOrderLowPassFilter {
     #[inline(always)]
     pub fn init(&mut self, value: f32) {
         self.value = value;
-        self.last_value = value;
     }
 
     #[inline(always)]
     pub fn update(&mut self, value: f32) -> f32 {
-        self.value = self.alpha * value + (1.0 - self.alpha) * self.last_value;
-        self.last_value = self.value;
+        self.value += self.alpha * (value - self.value);
         self.value
     }
 
