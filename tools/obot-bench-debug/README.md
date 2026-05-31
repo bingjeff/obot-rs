@@ -114,10 +114,11 @@ DRV configure/disable commands can use the same USB endpoint. The command return
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-driver-command-usb --sequence 1 --command configure-enable
 ```
 
-For a repeatable bring-up check, `check-driver-usb` safely sends a disable first, sends configure-enable, polls the USB text API for the main-loop DRV result, and prints the DRV plus safety gates in one row:
+For a repeatable bring-up check, `check-driver-usb` safely sends a disable first, sends configure-enable, polls the USB text API for the main-loop DRV result, and prints the DRV plus safety gates in one row. Use `--expect unpowered-fail-closed` for the no-VM diagnostic state, or `--expect powered-ready` for the future VM-supplied gate that must pass before considering bridge output enablement.
 
 ```sh
-cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- check-driver-usb --sequence 1 --command configure-enable
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- check-driver-usb --sequence 1 --command configure-enable --expect unpowered-fail-closed
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- check-driver-usb --sequence 1 --command configure-enable --expect powered-ready
 ```
 
 If more than one OBOT controller is attached, pass the exact `/dev/bus/usb` path reported by `lsusb` with `--dev /dev/bus/usb/<bus>/<dev>`. This uses the Rust packet format on endpoint 2. It is intended for Rust firmware bring-up and is not a drop-in replacement for the original C++ realtime host protocol.

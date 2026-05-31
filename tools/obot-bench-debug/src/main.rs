@@ -467,7 +467,12 @@ fn write_driver_command_usb_command(args: &[String]) -> Result<String, String> {
 fn check_driver_usb_command(args: &[String]) -> Result<String, String> {
     let options = DriverCheckUsbOptions::parse(args)?;
     let result = check_driver_usb(&options)?;
-    Ok(format_usb_driver_check_csv(DEFAULT_NAME, result))
+    let output = format_usb_driver_check_csv(DEFAULT_NAME, result);
+    if result.check_passed {
+        Ok(output)
+    } else {
+        Err(output)
+    }
 }
 
 fn write_driver_command_jlink_command(args: &[String]) -> Result<String, String> {
@@ -783,6 +788,14 @@ struct DriverCheckUsbOptions {
     poll_timeout_ms: u32,
     poll_interval_ms: u32,
     reset_settle_ms: u32,
+    expectation: DriverCheckExpectation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DriverCheckExpectation {
+    None,
+    UnpoweredFailClosed,
+    PoweredReady,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -804,6 +817,8 @@ struct UsbDriverCheckResult {
     immediate_status: StatusPacket,
     fields: UsbDriverCheckFields,
     report_observed: bool,
+    expectation: DriverCheckExpectation,
+    check_passed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1083,6 +1098,7 @@ impl DriverCheckUsbOptions {
             poll_timeout_ms: DEFAULT_USB_DRIVER_CHECK_TIMEOUT_MS,
             poll_interval_ms: DEFAULT_USB_DRIVER_CHECK_POLL_MS,
             reset_settle_ms: DEFAULT_USB_DRIVER_CHECK_RESET_MS,
+            expectation: DriverCheckExpectation::None,
         };
 
         let mut index = 0;
@@ -1125,6 +1141,13 @@ impl DriverCheckUsbOptions {
                     index += 1;
                     options.reset_settle_ms = parse_u32_arg(args.get(index), "--reset-settle-ms")?;
                 }
+                "--expect" => {
+                    index += 1;
+                    let expectation = args
+                        .get(index)
+                        .ok_or_else(|| "--expect requires a value".to_string())?;
+                    options.expectation = parse_driver_check_expectation(expectation)?;
+                }
                 other => return Err(format!("unknown option `{other}`")),
             }
             index += 1;
@@ -1135,6 +1158,19 @@ impl DriverCheckUsbOptions {
         }
 
         Ok(options)
+    }
+}
+
+fn parse_driver_check_expectation(value: &str) -> Result<DriverCheckExpectation, String> {
+    match value {
+        "none" => Ok(DriverCheckExpectation::None),
+        "unpowered-fail-closed" | "unpowered_fail_closed" => {
+            Ok(DriverCheckExpectation::UnpoweredFailClosed)
+        }
+        "powered-ready" | "powered_ready" => Ok(DriverCheckExpectation::PoweredReady),
+        _ => Err(format!(
+            "invalid --expect `{value}`; expected none, unpowered-fail-closed, or powered-ready"
+        )),
     }
 }
 
@@ -1464,12 +1500,20 @@ fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckRes
     let device_path = options.command.resolved_device_path()?;
     let fields = poll_usb_driver_check_fields(&device_path, options)?;
     let report_observed = usb_driver_report_observed(fields);
+    let check_passed = driver_check_expectation_passed(
+        options.expectation,
+        immediate_status,
+        fields,
+        report_observed,
+    );
 
     Ok(UsbDriverCheckResult {
         command: options.command.command,
         immediate_status,
         fields,
         report_observed,
+        expectation: options.expectation,
+        check_passed,
     })
 }
 
@@ -1515,6 +1559,44 @@ fn usb_driver_report_observed(fields: UsbDriverCheckFields) -> bool {
         || fields.transfer_error_mask != 0
         || fields.status_before != 0
         || fields.status_after != 0
+}
+
+fn driver_check_expectation_passed(
+    expectation: DriverCheckExpectation,
+    immediate_status: StatusPacket,
+    fields: UsbDriverCheckFields,
+    report_observed: bool,
+) -> bool {
+    match expectation {
+        DriverCheckExpectation::None => true,
+        DriverCheckExpectation::UnpoweredFailClosed => {
+            report_observed
+                && immediate_status.state.fault.is_none()
+                && !fields.driver_configured
+                && fields.transfer_error_mask != 0
+                && !fields.output_allowed
+                && fields.bus_blocked
+                && fields.driver_not_enabled
+        }
+        DriverCheckExpectation::PoweredReady => {
+            report_observed
+                && immediate_status.state.fault.is_none()
+                && fields.driver_configured
+                && fields.verify_error_mask == 0
+                && fields.transfer_error_mask == 0
+                && !fields.output_allowed
+                && !fields.bus_blocked
+                && !fields.driver_not_enabled
+        }
+    }
+}
+
+fn format_driver_check_expectation(expectation: DriverCheckExpectation) -> &'static str {
+    match expectation {
+        DriverCheckExpectation::None => "none",
+        DriverCheckExpectation::UnpoweredFailClosed => "unpowered_fail_closed",
+        DriverCheckExpectation::PoweredReady => "powered_ready",
+    }
 }
 
 fn transact_realtime_usb(
@@ -2557,12 +2639,14 @@ fn format_status_csv(name: &str, packet: StatusPacket) -> String {
 fn format_usb_driver_check_csv(name: &str, result: UsbDriverCheckResult) -> String {
     let fields = result.fields;
     format!(
-        "name, command, status_sequence, fault, report_observed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw\n{}, {}, {}, {}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}, {}\n",
+        "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw\n{}, {}, {}, {}, {}, {}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}, {}\n",
         name,
         format_driver_command(result.command),
         result.immediate_status.sequence,
         format_fault(result.immediate_status.state.fault),
         result.report_observed,
+        format_driver_check_expectation(result.expectation),
+        result.check_passed,
         fields.driver_configured,
         fields.verify_error_mask,
         fields.transfer_error_mask,
@@ -2898,7 +2982,7 @@ fn usage() -> String {
   obot-bench-debug write-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad] [--timeout-ms N]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
   obot-bench-debug write-driver-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command disable|configure-enable] [--timeout-ms N]
-  obot-bench-debug check-driver-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command configure-enable|disable] [--timeout-ms N] [--poll-timeout-ms N]
+  obot-bench-debug check-driver-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command configure-enable|disable] [--expect none|unpowered-fail-closed|powered-ready] [--timeout-ms N] [--poll-timeout-ms N]
 ",
         BENCHMARK_PACKET_LEN,
         BENCHMARK_PACKET_LEN,
@@ -3485,6 +3569,8 @@ mod tests {
             "25".to_string(),
             "--reset-settle-ms".to_string(),
             "75".to_string(),
+            "--expect".to_string(),
+            "powered-ready".to_string(),
         ])
         .unwrap();
 
@@ -3498,6 +3584,7 @@ mod tests {
         assert_eq!(options.poll_timeout_ms, 2000);
         assert_eq!(options.poll_interval_ms, 25);
         assert_eq!(options.reset_settle_ms, 75);
+        assert_eq!(options.expectation, DriverCheckExpectation::PoweredReady);
     }
 
     #[test]
@@ -3533,13 +3620,70 @@ mod tests {
                     bus_voltage_raw: 2,
                 },
                 report_observed: true,
+                expectation: DriverCheckExpectation::UnpoweredFailClosed,
+                check_passed: true,
             },
         );
 
         assert_eq!(
             output,
-            "name, command, status_sequence, fault, report_observed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw\nrust, configure_enable, 94, none, true, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2\n"
+            "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw\nrust, configure_enable, 94, none, true, unpowered_fail_closed, true, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2\n"
         );
+    }
+
+    #[test]
+    fn evaluates_driver_check_expectations() {
+        let unpowered = UsbDriverCheckFields {
+            driver_configured: false,
+            verify_error_mask: 0,
+            transfer_error_mask: 0x7F,
+            status_before: 0xFFFF_FFFF,
+            status_after: 0xFFFF_FFFF,
+            output_allowed: false,
+            bus_blocked: true,
+            driver_not_enabled: true,
+            bus_voltage_raw: 2,
+        };
+        let powered_ready = UsbDriverCheckFields {
+            driver_configured: true,
+            verify_error_mask: 0,
+            transfer_error_mask: 0,
+            status_before: 0,
+            status_after: 0,
+            output_allowed: false,
+            bus_blocked: false,
+            driver_not_enabled: false,
+            bus_voltage_raw: 2500,
+        };
+        let status = StatusPacket {
+            sequence: 1,
+            state: obot_core::MotorState::default(),
+        };
+
+        assert!(driver_check_expectation_passed(
+            DriverCheckExpectation::None,
+            status,
+            unpowered,
+            false,
+        ));
+        assert!(driver_check_expectation_passed(
+            DriverCheckExpectation::UnpoweredFailClosed,
+            status,
+            unpowered,
+            true,
+        ));
+        assert!(!driver_check_expectation_passed(
+            DriverCheckExpectation::PoweredReady,
+            status,
+            unpowered,
+            true,
+        ));
+        assert!(driver_check_expectation_passed(
+            DriverCheckExpectation::PoweredReady,
+            status,
+            powered_ready,
+            true,
+        ));
     }
 
     #[test]
