@@ -131,6 +131,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "write-text-api-request-jlink" => write_text_api_request_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
         "write-command-usb" => write_command_usb_command(rest),
+        "check-command-usb" => check_command_usb_command(rest),
         "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
         "write-driver-command-usb" => write_driver_command_usb_command(rest),
         "check-driver-usb" => check_driver_usb_command(rest),
@@ -468,6 +469,17 @@ fn write_command_usb_command(args: &[String]) -> Result<String, String> {
     Ok(format_status_csv(DEFAULT_NAME, status))
 }
 
+fn check_command_usb_command(args: &[String]) -> Result<String, String> {
+    let options = CommandCheckUsbOptions::parse(args)?;
+    let result = check_command_usb(&options)?;
+    let output = format_usb_command_check_csv(DEFAULT_NAME, result);
+    if result.check_passed {
+        Ok(output)
+    } else {
+        Err(command_failure(output))
+    }
+}
+
 fn write_driver_command_usb_command(args: &[String]) -> Result<String, String> {
     let options = DriverCommandUsbOptions::parse(args)?;
     let packet = DriverCommandPacket {
@@ -797,6 +809,72 @@ struct DriverCommandUsbOptions {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct CommandCheckUsbOptions {
+    command: RealtimeUsbOptions,
+    poll_timeout_ms: u32,
+    poll_interval_ms: u32,
+    reset_settle_ms: u32,
+    expectation: CommandCheckExpectation,
+    leave_command_active: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandCheckExpectation {
+    None,
+    UnpoweredOutputBlocked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UsbCommandCheckFields {
+    fault: Option<&'static str>,
+    torque_nm: f32,
+    velocity_rad_s: f32,
+    position_rad: f32,
+    output_allowed: bool,
+    command_blocked: bool,
+    bus_blocked: bool,
+    driver_not_enabled: bool,
+    host_timed_out: bool,
+    bridge_outputs_disabled: bool,
+    bridge_prearm_ready: bool,
+    bridge_prearm_blockers: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UsbCommandPostDisableFields {
+    sent: bool,
+    fault: Option<&'static str>,
+    torque_nm: f32,
+    velocity_rad_s: f32,
+    position_rad: f32,
+    command_blocked: bool,
+}
+
+impl UsbCommandPostDisableFields {
+    fn not_sent() -> Self {
+        Self {
+            sent: false,
+            fault: None,
+            torque_nm: 0.0,
+            velocity_rad_s: 0.0,
+            position_rad: 0.0,
+            command_blocked: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UsbCommandCheckResult {
+    command: MotorCommand,
+    immediate_status: StatusPacket,
+    fields: UsbCommandCheckFields,
+    post_disable: UsbCommandPostDisableFields,
+    expectation: CommandCheckExpectation,
+    command_observed: bool,
+    check_passed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct DriverCheckUsbOptions {
     command: DriverCommandUsbOptions,
     poll_timeout_ms: u32,
@@ -1123,6 +1201,69 @@ impl DriverCommandUsbOptions {
 
     fn resolved_device_path(&self) -> Result<PathBuf, String> {
         resolve_usb_device_path(self.device_path.as_ref())
+    }
+}
+
+impl CommandCheckUsbOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut command_args = Vec::new();
+        let mut options = Self {
+            command: RealtimeUsbOptions::parse(&[])?,
+            poll_timeout_ms: 90,
+            poll_interval_ms: 2,
+            reset_settle_ms: 10,
+            expectation: CommandCheckExpectation::None,
+            leave_command_active: false,
+        };
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--poll-timeout-ms" => {
+                    index += 1;
+                    options.poll_timeout_ms = parse_u32_arg(args.get(index), "--poll-timeout-ms")?;
+                }
+                "--poll-interval-ms" => {
+                    index += 1;
+                    options.poll_interval_ms =
+                        parse_u32_arg(args.get(index), "--poll-interval-ms")?;
+                }
+                "--reset-settle-ms" => {
+                    index += 1;
+                    options.reset_settle_ms = parse_u32_arg(args.get(index), "--reset-settle-ms")?;
+                }
+                "--expect" => {
+                    index += 1;
+                    let expectation = args
+                        .get(index)
+                        .ok_or_else(|| "--expect requires a value".to_string())?;
+                    options.expectation = parse_command_check_expectation(expectation)?;
+                }
+                "--leave-command-active" => {
+                    options.leave_command_active = true;
+                }
+                _ => command_args.push(args[index].clone()),
+            }
+            index += 1;
+        }
+
+        if options.poll_interval_ms == 0 {
+            return Err("--poll-interval-ms must be nonzero".to_string());
+        }
+        options.command = RealtimeUsbOptions::parse(&command_args)?;
+        Ok(options)
+    }
+}
+
+fn parse_command_check_expectation(value: &str) -> Result<CommandCheckExpectation, String> {
+    match value {
+        "none" => Ok(CommandCheckExpectation::None),
+        "unpowered-output-blocked" | "unpowered_output_blocked" => {
+            Ok(CommandCheckExpectation::UnpoweredOutputBlocked)
+        }
+        _ => Err(format!(
+            "invalid --expect `{value}`; expected none or unpowered-output-blocked"
+        )),
     }
 }
 
@@ -1549,6 +1690,165 @@ impl UsbRunStatsAccumulator {
 
 fn mean_milli(sum: u64, samples: u64) -> u64 {
     (sum * 1_000 + samples / 2) / samples
+}
+
+fn check_command_usb(options: &CommandCheckUsbOptions) -> Result<UsbCommandCheckResult, String> {
+    let packet = CommandPacket {
+        sequence: options.command.sequence,
+        command: MotorCommand {
+            mode: options.command.mode,
+            torque_nm: options.command.torque_nm,
+            velocity_rad_s: options.command.velocity_rad_s,
+            position_rad: options.command.position_rad,
+        },
+    };
+    let immediate_status = transact_realtime_usb(&options.command, packet)?;
+    let device_path = options.command.resolved_device_path()?;
+    let (fields, command_observed) = poll_usb_command_check_fields(&device_path, options, packet)?;
+    let check_passed = command_check_expectation_passed(
+        options.expectation,
+        packet.command,
+        fields,
+        command_observed,
+    );
+    let post_disable = if !options.leave_command_active && packet.command.mode != ControlMode::Disabled {
+        let mut disable = options.command.clone();
+        disable.sequence = disable.sequence.wrapping_add(1);
+        disable.mode = ControlMode::Disabled;
+        disable.torque_nm = 0.0;
+        disable.velocity_rad_s = 0.0;
+        disable.position_rad = 0.0;
+        let disable_packet = CommandPacket {
+            sequence: disable.sequence,
+            command: MotorCommand::default(),
+        };
+        transact_realtime_usb(&disable, disable_packet)?;
+        thread::sleep(Duration::from_millis(options.reset_settle_ms as u64));
+        read_usb_command_post_disable_fields(&device_path, options.command.timeout_ms)?
+    } else {
+        UsbCommandPostDisableFields::not_sent()
+    };
+
+    Ok(UsbCommandCheckResult {
+        command: packet.command,
+        immediate_status,
+        fields,
+        post_disable,
+        expectation: options.expectation,
+        command_observed,
+        check_passed,
+    })
+}
+
+fn poll_usb_command_check_fields(
+    device_path: &Path,
+    options: &CommandCheckUsbOptions,
+    packet: CommandPacket,
+) -> Result<(UsbCommandCheckFields, bool), String> {
+    let deadline = Instant::now() + Duration::from_millis(options.poll_timeout_ms as u64);
+    let mut poll_options = options.command.clone();
+    loop {
+        let status = transact_realtime_usb(&poll_options, packet)?;
+        let fields = read_usb_command_check_fields(device_path, options.command.timeout_ms, status)?;
+        let observed = usb_command_observed(packet.command, fields);
+        if observed || Instant::now() >= deadline {
+            return Ok((fields, observed));
+        }
+        poll_options.sequence = poll_options.sequence.wrapping_add(1);
+        thread::sleep(Duration::from_millis(options.poll_interval_ms as u64));
+    }
+}
+
+fn read_usb_command_check_fields(
+    device_path: &Path,
+    timeout_ms: u32,
+    status: StatusPacket,
+) -> Result<UsbCommandCheckFields, String> {
+    let file = open_usb_device(device_path)?;
+    let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
+    Ok(UsbCommandCheckFields {
+        fault: if status.state.fault.is_some() {
+            Some(format_fault(status.state.fault))
+        } else {
+            None
+        },
+        torque_nm: status.state.torque_nm,
+        velocity_rad_s: status.state.velocity_rad_s,
+        position_rad: status.state.position_rad,
+        output_allowed: text_api_usb_bool_on_file(&file, "output_allowed", timeout_ms)?,
+        command_blocked: text_api_usb_bool_on_file(&file, "command_blocked", timeout_ms)?,
+        bus_blocked: text_api_usb_bool_on_file(&file, "bus_blocked", timeout_ms)?,
+        driver_not_enabled: text_api_usb_bool_on_file(&file, "driver_not_enabled", timeout_ms)?,
+        host_timed_out: text_api_usb_bool_on_file(&file, "host_timed_out", timeout_ms)?,
+        bridge_outputs_disabled: text_api_usb_bool_on_file(
+            &file,
+            "bridge_outputs_disabled",
+            timeout_ms,
+        )?,
+        bridge_prearm_ready: text_api_usb_bool_on_file(&file, "bridge_prearm_ready", timeout_ms)?,
+        bridge_prearm_blockers: text_api_usb_u32_on_file(
+            &file,
+            "bridge_prearm_blockers",
+            timeout_ms,
+        )?,
+    })
+}
+
+fn read_usb_command_post_disable_fields(
+    device_path: &Path,
+    timeout_ms: u32,
+) -> Result<UsbCommandPostDisableFields, String> {
+    let file = open_usb_device(device_path)?;
+    let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
+    Ok(UsbCommandPostDisableFields {
+        sent: true,
+        fault: None,
+        torque_nm: 0.0,
+        velocity_rad_s: 0.0,
+        position_rad: 0.0,
+        command_blocked: text_api_usb_bool_on_file(&file, "command_blocked", timeout_ms)?,
+    })
+}
+
+fn usb_command_observed(command: MotorCommand, fields: UsbCommandCheckFields) -> bool {
+    match command.mode {
+        ControlMode::Disabled | ControlMode::ClearFaults => {
+            approx_eq(fields.torque_nm, 0.0)
+                && approx_eq(fields.velocity_rad_s, 0.0)
+                && approx_eq(fields.position_rad, 0.0)
+        }
+        ControlMode::Torque => approx_eq(fields.torque_nm, command.torque_nm),
+        ControlMode::Velocity => approx_eq(fields.velocity_rad_s, command.velocity_rad_s),
+        ControlMode::Position => approx_eq(fields.position_rad, command.position_rad),
+    }
+}
+
+fn command_check_expectation_passed(
+    expectation: CommandCheckExpectation,
+    command: MotorCommand,
+    fields: UsbCommandCheckFields,
+    command_observed: bool,
+) -> bool {
+    match expectation {
+        CommandCheckExpectation::None => true,
+        CommandCheckExpectation::UnpoweredOutputBlocked => {
+            command_observed
+                && command.mode != ControlMode::Disabled
+                && fields.fault.is_none()
+                && !fields.output_allowed
+                && !fields.command_blocked
+                && fields.bus_blocked
+                && fields.driver_not_enabled
+                && !fields.host_timed_out
+                && fields.bridge_outputs_disabled
+                && !fields.bridge_prearm_ready
+                && fields.bridge_prearm_blockers != 0
+        }
+    }
+}
+
+fn approx_eq(actual: f32, expected: f32) -> bool {
+    (actual - expected).abs() < 0.001
 }
 
 fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckResult, String> {
@@ -2762,6 +3062,10 @@ fn format_snapshot_csv(name: &str, snapshot: DebugSnapshot) -> String {
     )
 }
 
+fn format_optional_fault(fault: Option<&str>) -> &str {
+    fault.unwrap_or("none")
+}
+
 fn format_status_csv(name: &str, packet: StatusPacket) -> String {
     format!(
         "name, sequence, fault, torque_nm, velocity_rad_s, position_rad\n{}, {}, {}, {}, {}, {}\n",
@@ -2772,6 +3076,56 @@ fn format_status_csv(name: &str, packet: StatusPacket) -> String {
         packet.state.velocity_rad_s,
         packet.state.position_rad,
     )
+}
+
+fn format_usb_command_check_csv(name: &str, result: UsbCommandCheckResult) -> String {
+    let fields = result.fields;
+    let post_disable = result.post_disable;
+    format!(
+        "name, command_mode, status_sequence, status_fault, expectation, check_passed, command_observed, post_disable_sent, post_disable_fault, post_disable_torque_nm, post_disable_velocity_rad_s, post_disable_position_rad, post_disable_command_blocked, fault, torque_nm, velocity_rad_s, position_rad, output_allowed, command_blocked, bus_blocked, driver_not_enabled, host_timed_out, bridge_outputs_disabled, bridge_prearm_ready, bridge_prearm_blockers\n{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, 0x{:08X}\n",
+        name,
+        format_control_mode(result.command.mode),
+        result.immediate_status.sequence,
+        format_fault(result.immediate_status.state.fault),
+        format_command_check_expectation(result.expectation),
+        result.check_passed,
+        result.command_observed,
+        post_disable.sent,
+        format_optional_fault(post_disable.fault),
+        post_disable.torque_nm,
+        post_disable.velocity_rad_s,
+        post_disable.position_rad,
+        post_disable.command_blocked,
+        format_optional_fault(fields.fault),
+        fields.torque_nm,
+        fields.velocity_rad_s,
+        fields.position_rad,
+        fields.output_allowed,
+        fields.command_blocked,
+        fields.bus_blocked,
+        fields.driver_not_enabled,
+        fields.host_timed_out,
+        fields.bridge_outputs_disabled,
+        fields.bridge_prearm_ready,
+        fields.bridge_prearm_blockers,
+    )
+}
+
+fn format_control_mode(mode: ControlMode) -> &'static str {
+    match mode {
+        ControlMode::Disabled => "disabled",
+        ControlMode::Torque => "torque",
+        ControlMode::Velocity => "velocity",
+        ControlMode::Position => "position",
+        ControlMode::ClearFaults => "clear_faults",
+    }
+}
+
+fn format_command_check_expectation(expectation: CommandCheckExpectation) -> &'static str {
+    match expectation {
+        CommandCheckExpectation::None => "none",
+        CommandCheckExpectation::UnpoweredOutputBlocked => "unpowered_output_blocked",
+    }
 }
 
 fn format_usb_driver_check_csv(name: &str, result: UsbDriverCheckResult) -> String {
@@ -3128,6 +3482,7 @@ fn usage() -> String {
   obot-bench-debug read-text-api-usb [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N] <api-request>
   obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
   obot-bench-debug write-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad] [--timeout-ms N]
+  obot-bench-debug check-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--mode torque|velocity|position] [--torque Nm] [--velocity rad_s] [--position rad] [--expect none|unpowered-output-blocked] [--poll-timeout-ms N] [--poll-interval-ms N] [--leave-command-active]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
   obot-bench-debug write-driver-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command disable|configure-enable] [--timeout-ms N]
   obot-bench-debug check-driver-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command configure-enable|disable] [--expect none|unpowered-fail-closed|powered-ready] [--timeout-ms N] [--poll-timeout-ms N] [--leave-driver-enabled]
@@ -3900,6 +4255,142 @@ mod tests {
             bridge_prearm_ready: false,
             bridge_prearm_blockers: 0x0000_0003,
         }));
+    }
+
+
+    #[test]
+    fn parses_command_check_usb_options() {
+        let options = CommandCheckUsbOptions::parse(&[
+            "--dev".to_string(),
+            "/dev/bus/usb/001/043".to_string(),
+            "--sequence".to_string(),
+            "88".to_string(),
+            "--mode".to_string(),
+            "position".to_string(),
+            "--position".to_string(),
+            "0.75".to_string(),
+            "--timeout-ms".to_string(),
+            "250".to_string(),
+            "--poll-timeout-ms".to_string(),
+            "80".to_string(),
+            "--poll-interval-ms".to_string(),
+            "4".to_string(),
+            "--reset-settle-ms".to_string(),
+            "8".to_string(),
+            "--expect".to_string(),
+            "unpowered-output-blocked".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            options.command.device_path,
+            Some(PathBuf::from("/dev/bus/usb/001/043"))
+        );
+        assert_eq!(options.command.sequence, 88);
+        assert_eq!(options.command.mode, ControlMode::Position);
+        assert_eq!(options.command.position_rad, 0.75);
+        assert_eq!(options.command.timeout_ms, 250);
+        assert_eq!(options.poll_timeout_ms, 80);
+        assert_eq!(options.poll_interval_ms, 4);
+        assert_eq!(options.reset_settle_ms, 8);
+        assert_eq!(
+            options.expectation,
+            CommandCheckExpectation::UnpoweredOutputBlocked
+        );
+        assert!(!options.leave_command_active);
+    }
+
+    #[test]
+    fn formats_usb_command_check_csv() {
+        let output = format_usb_command_check_csv(
+            "rust",
+            UsbCommandCheckResult {
+                command: MotorCommand {
+                    mode: ControlMode::Velocity,
+                    velocity_rad_s: 1.25,
+                    ..MotorCommand::default()
+                },
+                immediate_status: StatusPacket {
+                    sequence: 77,
+                    state: obot_core::MotorState::default(),
+                },
+                fields: UsbCommandCheckFields {
+                    fault: None,
+                    torque_nm: 0.0,
+                    velocity_rad_s: 1.25,
+                    position_rad: 0.0,
+                    output_allowed: false,
+                    command_blocked: false,
+                    bus_blocked: true,
+                    driver_not_enabled: true,
+                    host_timed_out: false,
+                    bridge_outputs_disabled: true,
+                    bridge_prearm_ready: false,
+                    bridge_prearm_blockers: 0x0000_0003,
+                },
+                post_disable: UsbCommandPostDisableFields {
+                    sent: true,
+                    fault: None,
+                    torque_nm: 0.0,
+                    velocity_rad_s: 0.0,
+                    position_rad: 0.0,
+                    command_blocked: true,
+                },
+                expectation: CommandCheckExpectation::UnpoweredOutputBlocked,
+                command_observed: true,
+                check_passed: true,
+            },
+        );
+
+        assert_eq!(
+            output,
+            "name, command_mode, status_sequence, status_fault, expectation, check_passed, command_observed, post_disable_sent, post_disable_fault, post_disable_torque_nm, post_disable_velocity_rad_s, post_disable_position_rad, post_disable_command_blocked, fault, torque_nm, velocity_rad_s, position_rad, output_allowed, command_blocked, bus_blocked, driver_not_enabled, host_timed_out, bridge_outputs_disabled, bridge_prearm_ready, bridge_prearm_blockers\nrust, velocity, 77, none, unpowered_output_blocked, true, true, true, none, 0, 0, 0, true, none, 0, 1.25, 0, false, false, true, true, false, true, false, 0x00000003\n"
+        );
+    }
+
+    #[test]
+    fn evaluates_command_check_expectations() {
+        let command = MotorCommand {
+            mode: ControlMode::Position,
+            position_rad: 0.75,
+            ..MotorCommand::default()
+        };
+        let blocked = UsbCommandCheckFields {
+            fault: None,
+            torque_nm: 0.0,
+            velocity_rad_s: 0.0,
+            position_rad: 0.75,
+            output_allowed: false,
+            command_blocked: false,
+            bus_blocked: true,
+            driver_not_enabled: true,
+            host_timed_out: false,
+            bridge_outputs_disabled: true,
+            bridge_prearm_ready: false,
+            bridge_prearm_blockers: 0x0000_0003,
+        };
+
+        assert!(command_check_expectation_passed(
+            CommandCheckExpectation::UnpoweredOutputBlocked,
+            command,
+            blocked,
+            true,
+        ));
+        assert!(!command_check_expectation_passed(
+            CommandCheckExpectation::UnpoweredOutputBlocked,
+            command,
+            UsbCommandCheckFields {
+                output_allowed: true,
+                ..blocked
+            },
+            true,
+        ));
+        assert!(!command_check_expectation_passed(
+            CommandCheckExpectation::UnpoweredOutputBlocked,
+            command,
+            blocked,
+            false,
+        ));
     }
 
     #[test]

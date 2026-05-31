@@ -108,6 +108,13 @@ To send the same Rust-owned command packet over the USB realtime endpoint and re
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-command-usb --sequence 1 --mode disabled
 ```
 
+To verify an output-requesting command without leaving it active, `check-command-usb` writes the command, polls realtime status until the command state is observed, reads the safety gates, then sends disabled cleanup by default. On an unpowered/no-VM board, velocity and position commands should be accepted but output-blocked:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- check-command-usb --sequence 1 --mode velocity --velocity 1.25 --expect unpowered-output-blocked
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- check-command-usb --sequence 2 --mode position --position 0.75 --expect unpowered-output-blocked
+```
+
 DRV configure/disable commands can use the same USB endpoint. The command returns the immediate status response; read `driver_configured`, `transfer_error_mask`, and related USB text API fields after a short wait for the main-loop DRV result.
 
 ```sh
