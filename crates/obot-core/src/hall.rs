@@ -112,9 +112,8 @@ pub struct HallMotionEstimate {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HallMotionEstimator {
-    counts_per_revolution: f32,
-    direction: f32,
-    sample_frequency_hz: f32,
+    position_radians_per_count: f32,
+    velocity_radians_per_count: f32,
     velocity_filter_alpha: f32,
     last_count: i32,
     initialized: bool,
@@ -130,10 +129,10 @@ impl HallMotionEstimator {
         sample_frequency_hz: f32,
         velocity_filter_alpha: f32,
     ) -> Self {
+        let position_radians_per_count = direction * TWO_PI / counts_per_revolution;
         Self {
-            counts_per_revolution,
-            direction,
-            sample_frequency_hz,
+            position_radians_per_count,
+            velocity_radians_per_count: position_radians_per_count * sample_frequency_hz,
             velocity_filter_alpha,
             last_count: 0,
             initialized: false,
@@ -156,10 +155,8 @@ impl HallMotionEstimator {
         };
         self.last_count = sample.count;
 
-        let radians_per_count = TWO_PI / self.counts_per_revolution;
-        let position_rad = self.direction * sample.count as f32 * radians_per_count;
-        let velocity_rad_s =
-            self.direction * diff as f32 * radians_per_count * self.sample_frequency_hz;
+        let position_rad = sample.count as f32 * self.position_radians_per_count;
+        let velocity_rad_s = diff as f32 * self.velocity_radians_per_count;
         let velocity_filtered_rad_s = self.estimate.velocity_filtered_rad_s
             + self.velocity_filter_alpha * (velocity_rad_s - self.estimate.velocity_filtered_rad_s);
 
