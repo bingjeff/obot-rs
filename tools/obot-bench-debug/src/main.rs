@@ -58,6 +58,8 @@ const USB_TEXT_IN_ENDPOINT: u32 = 0x81;
 const USBDEVFS_BULK: c_ulong = 0xC018_5502;
 const USBDEVFS_CLAIMINTERFACE: c_ulong = 0x8004_550F;
 const USBDEVFS_RELEASEINTERFACE: c_ulong = 0x8004_5510;
+const COMMAND_FAILURE_PREFIX: &str = "obot-bench-debug command failure\n";
+
 const HEAP_ALLOCATOR_SYMBOLS: &[&str] = &[
     "__rust_alloc",
     "__rust_dealloc",
@@ -78,11 +80,23 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("error: {error}");
-            eprintln!("{}", usage());
+            if let Some(message) = command_failure_message(&error) {
+                eprint!("{message}");
+            } else {
+                eprintln!("error: {error}");
+                eprintln!("{}", usage());
+            }
             ExitCode::FAILURE
         }
     }
+}
+
+fn command_failure(message: String) -> String {
+    format!("{COMMAND_FAILURE_PREFIX}{message}")
+}
+
+fn command_failure_message(error: &str) -> Option<&str> {
+    error.strip_prefix(COMMAND_FAILURE_PREFIX)
 }
 
 fn run(args: Vec<String>) -> Result<String, String> {
@@ -471,7 +485,7 @@ fn check_driver_usb_command(args: &[String]) -> Result<String, String> {
     if result.check_passed {
         Ok(output)
     } else {
-        Err(output)
+        Err(command_failure(output))
     }
 }
 
@@ -3674,6 +3688,14 @@ mod tests {
             output,
             "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled, bridge_prearm_ready, bridge_prearm_blockers\nrust, configure_enable, 94, none, true, unpowered_fail_closed, true, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2, 0x0000, true, false, false, 0x00000003\n"
         );
+    }
+
+    #[test]
+    fn formats_command_failures_without_usage() {
+        let failure = command_failure("csv result\n".to_string());
+
+        assert_eq!(command_failure_message(&failure), Some("csv result\n"));
+        assert_eq!(command_failure_message("parse error"), None);
     }
 
     #[test]
