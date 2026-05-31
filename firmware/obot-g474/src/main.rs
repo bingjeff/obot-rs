@@ -3,6 +3,8 @@
 #![cfg_attr(target_os = "none", allow(dead_code))]
 
 #[cfg(target_os = "none")]
+mod debug_report;
+#[cfg(target_os = "none")]
 mod startup;
 
 #[cfg(target_os = "none")]
@@ -93,7 +95,8 @@ fn run_measured_loop(
 #[cfg(target_os = "none")]
 fn publish_benchmark_report(sequence: u8, report: BenchmarkReport) -> u8 {
     let packet = BenchmarkPacket { sequence, report };
-    core::hint::black_box(packet.encode());
+    debug_report::publish(packet);
+    core::hint::black_box((debug_report::packet_ptr(), debug_report::packet_len()));
     sequence.wrapping_add(1)
 }
 
