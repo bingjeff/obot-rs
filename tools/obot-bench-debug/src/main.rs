@@ -119,6 +119,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "run-stats-jlink" => run_stats_jlink_command(rest),
         "run-stats-usb" => run_stats_usb_command(rest),
         "compare-baseline-usb" => compare_baseline_usb_command(rest),
+        "accepted-proof-usb" => accepted_proof_usb_command(rest),
         "verify-no-heap" => verify_no_heap_command(rest),
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
@@ -275,6 +276,11 @@ fn compare_baseline_usb_command(args: &[String]) -> Result<String, String> {
     let options = UsbRunStatsOptions::parse(args)?;
     let stats = read_usb_run_stats(&options)?;
     format_usb_baseline_comparison_csv(stats)
+}
+
+fn accepted_proof_usb_command(args: &[String]) -> Result<String, String> {
+    let options = AcceptedProofUsbOptions::parse(args)?;
+    accepted_proof_usb(&options)
 }
 
 fn read_text_api_usb_command(args: &[String]) -> Result<String, String> {
@@ -953,6 +959,19 @@ struct UsbRunStatsOptions {
     timeout_ms: u32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct AcceptedProofUsbOptions {
+    device_path: Option<PathBuf>,
+    samples: usize,
+    sequence: u8,
+    timeout_ms: u32,
+    command_poll_timeout_ms: u32,
+    command_poll_interval_ms: u32,
+    driver_poll_timeout_ms: u32,
+    driver_poll_interval_ms: u32,
+    reset_settle_ms: u32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct UsbRunStats {
     max_fast_loop_cycles: u32,
@@ -1151,6 +1170,105 @@ impl UsbRunStatsOptions {
 
     fn resolved_device_path(&self) -> Result<PathBuf, String> {
         resolve_usb_device_path(self.device_path.as_ref())
+    }
+}
+
+impl AcceptedProofUsbOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            device_path: None,
+            samples: 100,
+            sequence: 200,
+            timeout_ms: DEFAULT_USB_TIMEOUT_MS,
+            command_poll_timeout_ms: 90,
+            command_poll_interval_ms: 2,
+            driver_poll_timeout_ms: DEFAULT_USB_DRIVER_CHECK_TIMEOUT_MS,
+            driver_poll_interval_ms: DEFAULT_USB_DRIVER_CHECK_POLL_MS,
+            reset_settle_ms: DEFAULT_USB_DRIVER_CHECK_RESET_MS,
+        };
+        let mut positional_samples = None;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--dev" | "--device-path" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--dev requires a value".to_string())?;
+                    options.device_path = Some(PathBuf::from(path));
+                }
+                "--samples" => {
+                    index += 1;
+                    let samples = parse_u32_arg(args.get(index), "--samples")?;
+                    options.samples = samples
+                        .try_into()
+                        .map_err(|_| "--samples does not fit in usize".to_string())?;
+                }
+                "--sequence" => {
+                    index += 1;
+                    let sequence = parse_u32_arg(args.get(index), "--sequence")?;
+                    options.sequence = sequence
+                        .try_into()
+                        .map_err(|_| "--sequence must fit in u8".to_string())?;
+                }
+                "--timeout-ms" => {
+                    index += 1;
+                    options.timeout_ms = parse_u32_arg(args.get(index), "--timeout-ms")?;
+                }
+                "--command-poll-timeout-ms" => {
+                    index += 1;
+                    options.command_poll_timeout_ms =
+                        parse_u32_arg(args.get(index), "--command-poll-timeout-ms")?;
+                }
+                "--command-poll-interval-ms" => {
+                    index += 1;
+                    options.command_poll_interval_ms =
+                        parse_u32_arg(args.get(index), "--command-poll-interval-ms")?;
+                }
+                "--driver-poll-timeout-ms" => {
+                    index += 1;
+                    options.driver_poll_timeout_ms =
+                        parse_u32_arg(args.get(index), "--driver-poll-timeout-ms")?;
+                }
+                "--driver-poll-interval-ms" => {
+                    index += 1;
+                    options.driver_poll_interval_ms =
+                        parse_u32_arg(args.get(index), "--driver-poll-interval-ms")?;
+                }
+                "--reset-settle-ms" => {
+                    index += 1;
+                    options.reset_settle_ms = parse_u32_arg(args.get(index), "--reset-settle-ms")?;
+                }
+                value => {
+                    if positional_samples.is_some() {
+                        return Err(format!("unexpected extra sample-count argument `{value}`"));
+                    }
+                    positional_samples = Some(
+                        parse_u32(value)
+                            .ok_or_else(|| format!("invalid sample-count argument `{value}`"))?,
+                    );
+                }
+            }
+            index += 1;
+        }
+        if let Some(samples) = positional_samples {
+            options.samples = samples
+                .try_into()
+                .map_err(|_| "sample count does not fit in usize".to_string())?;
+        }
+        if options.samples == 0 {
+            return Err("accepted-proof-usb requires at least one sample".to_string());
+        }
+        if options.sequence > 248 {
+            return Err("--sequence must be 248 or lower for accepted-proof-usb".to_string());
+        }
+        if options.command_poll_interval_ms == 0 {
+            return Err("--command-poll-interval-ms must be nonzero".to_string());
+        }
+        if options.driver_poll_interval_ms == 0 {
+            return Err("--driver-poll-interval-ms must be nonzero".to_string());
+        }
+        Ok(options)
     }
 }
 
@@ -1553,6 +1671,115 @@ fn read_usb_run_stats(options: &UsbRunStatsOptions) -> Result<UsbRunStats, Strin
     }
 
     Ok(stats.finish())
+}
+
+fn accepted_proof_usb(options: &AcceptedProofUsbOptions) -> Result<String, String> {
+    let mut output = String::new();
+
+    let driver_result = check_driver_usb(&accepted_proof_driver_options(options))?;
+    append_proof_section(
+        &mut output,
+        "driver_unpowered_fail_closed",
+        &format_usb_driver_check_csv(DEFAULT_NAME, driver_result),
+    );
+    if !driver_result.check_passed {
+        return Err(command_failure(output));
+    }
+
+    for (name, command_options) in [
+        (
+            "torque_unpowered_output_blocked",
+            accepted_proof_command_options(options, 2, ControlMode::Torque, 0.25, 0.0, 0.0),
+        ),
+        (
+            "velocity_unpowered_output_blocked",
+            accepted_proof_command_options(options, 4, ControlMode::Velocity, 0.0, 1.25, 0.0),
+        ),
+        (
+            "position_unpowered_output_blocked",
+            accepted_proof_command_options(options, 6, ControlMode::Position, 0.0, 0.0, 0.75),
+        ),
+    ] {
+        let command_result = check_command_usb(&command_options)?;
+        append_proof_section(
+            &mut output,
+            name,
+            &format_usb_command_check_csv(DEFAULT_NAME, command_result),
+        );
+        if !command_result.check_passed {
+            return Err(command_failure(output));
+        }
+    }
+
+    let stats = read_usb_run_stats(&UsbRunStatsOptions {
+        device_path: options.device_path.clone(),
+        samples: options.samples,
+        timeout_ms: options.timeout_ms,
+    })?;
+    append_proof_section(
+        &mut output,
+        "timing_stats",
+        &format_usb_run_stats_csv(DEFAULT_NAME, stats),
+    );
+    match format_usb_baseline_comparison_csv(stats) {
+        Ok(comparison) => {
+            append_proof_section(&mut output, "baseline_comparison", &comparison);
+            Ok(output)
+        }
+        Err(comparison) => {
+            append_proof_section(&mut output, "baseline_comparison", &comparison);
+            Err(command_failure(output))
+        }
+    }
+}
+
+fn accepted_proof_driver_options(options: &AcceptedProofUsbOptions) -> DriverCheckUsbOptions {
+    DriverCheckUsbOptions {
+        command: DriverCommandUsbOptions {
+            device_path: options.device_path.clone(),
+            sequence: options.sequence,
+            command: DriverCommand::ConfigureEnable,
+            timeout_ms: options.timeout_ms,
+        },
+        poll_timeout_ms: options.driver_poll_timeout_ms,
+        poll_interval_ms: options.driver_poll_interval_ms,
+        reset_settle_ms: options.reset_settle_ms,
+        expectation: DriverCheckExpectation::UnpoweredFailClosed,
+        leave_driver_enabled: false,
+    }
+}
+
+fn accepted_proof_command_options(
+    options: &AcceptedProofUsbOptions,
+    sequence_offset: u8,
+    mode: ControlMode,
+    torque_nm: f32,
+    velocity_rad_s: f32,
+    position_rad: f32,
+) -> CommandCheckUsbOptions {
+    CommandCheckUsbOptions {
+        command: RealtimeUsbOptions {
+            device_path: options.device_path.clone(),
+            sequence: options.sequence + sequence_offset,
+            mode,
+            torque_nm,
+            velocity_rad_s,
+            position_rad,
+            timeout_ms: options.timeout_ms,
+        },
+        poll_timeout_ms: options.command_poll_timeout_ms,
+        poll_interval_ms: options.command_poll_interval_ms,
+        reset_settle_ms: options.reset_settle_ms,
+        expectation: CommandCheckExpectation::UnpoweredOutputBlocked,
+        leave_command_active: false,
+    }
+}
+
+fn append_proof_section(output: &mut String, name: &str, body: &str) {
+    output.push_str("proof_section, ");
+    output.push_str(name);
+    output.push('\n');
+    output.push_str(body);
 }
 
 fn open_usb_device(path: &Path) -> Result<fs::File, String> {
@@ -3470,6 +3697,7 @@ fn usage() -> String {
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
   obot-bench-debug compare-baseline-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
+  obot-bench-debug accepted-proof-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--timeout-ms N] [--command-poll-timeout-ms N] [--command-poll-interval-ms N] [--driver-poll-timeout-ms N] [--driver-poll-interval-ms N]
   obot-bench-debug verify-no-heap [--elf target/thumbv7em-none-eabihf/release/obot-g474]
   obot-bench-debug read-status-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <status-packet-address>] [--speed 4000]
   obot-bench-debug read-driver-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <driver-report-address>] [--speed 4000]
@@ -4056,6 +4284,54 @@ mod tests {
 
         assert!(output.contains("combined_max, 9995, 9995, 58.79, 58.79, fail"));
         assert!(output.contains("combined_mean, 7100.315, 7100.315, 41.77, 41.77, fail"));
+    }
+
+    #[test]
+    fn parses_accepted_proof_usb_options() {
+        let options = AcceptedProofUsbOptions::parse(&[
+            "64".to_string(),
+            "--dev".to_string(),
+            "/dev/bus/usb/001/043".to_string(),
+            "--sequence".to_string(),
+            "180".to_string(),
+            "--timeout-ms".to_string(),
+            "250".to_string(),
+            "--command-poll-timeout-ms".to_string(),
+            "80".to_string(),
+            "--command-poll-interval-ms".to_string(),
+            "4".to_string(),
+            "--driver-poll-timeout-ms".to_string(),
+            "2000".to_string(),
+            "--driver-poll-interval-ms".to_string(),
+            "25".to_string(),
+            "--reset-settle-ms".to_string(),
+            "75".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            options.device_path,
+            Some(PathBuf::from("/dev/bus/usb/001/043"))
+        );
+        assert_eq!(options.samples, 64);
+        assert_eq!(options.sequence, 180);
+        assert_eq!(options.timeout_ms, 250);
+        assert_eq!(options.command_poll_timeout_ms, 80);
+        assert_eq!(options.command_poll_interval_ms, 4);
+        assert_eq!(options.driver_poll_timeout_ms, 2000);
+        assert_eq!(options.driver_poll_interval_ms, 25);
+        assert_eq!(options.reset_settle_ms, 75);
+    }
+
+    #[test]
+    fn rejects_accepted_proof_usb_sequence_that_would_wrap() {
+        let error = AcceptedProofUsbOptions::parse(&[
+            "--sequence".to_string(),
+            "249".to_string(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(error, "--sequence must be 248 or lower for accepted-proof-usb");
     }
 
     #[test]
