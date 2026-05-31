@@ -96,14 +96,14 @@ fn firmware_main() -> ! {
         if poll.fast {
             run_measured_loop(&mut fast_benchmark, &cycle_counter, || {
                 pwm.write_zero_voltage();
-                let hall_count = hall.read_count();
-                let hall_sincos = hall_angle.sincos(hall_count);
+                let hall_sample = hall.read_sample();
+                let hall_sincos = hall_angle.sincos_hall_count(hall_sample.hall_count);
                 let currents = current_calibration.convert(current_adc.read_samples());
                 let foc_command = FocCommand {
                     desired: FocDesired::default(),
                     measured: FocMeasured {
                         currents,
-                        motor_electrical_angle: hall_angle.electrical_radians(hall_count),
+                        motor_electrical_angle: hall_angle.electrical_radians(hall_sample.count),
                     },
                 };
                 let foc_status =

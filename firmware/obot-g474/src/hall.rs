@@ -1,6 +1,6 @@
 use core::ptr::{read_volatile, write_volatile};
 
-use obot_core::hall::HallEncoder;
+use obot_core::hall::{HallEncoder, HallSample};
 
 const RCC_BASE: usize = 0x4002_1000;
 const RCC_AHB2ENR: usize = RCC_BASE + 0x4C;
@@ -34,7 +34,11 @@ impl HallInputs {
     }
 
     pub fn read_count(&mut self) -> i32 {
-        self.encoder.read(self.raw_bits())
+        self.read_sample().count
+    }
+
+    pub fn read_sample(&mut self) -> HallSample {
+        self.encoder.read_sample(self.raw_bits())
     }
 
     pub fn raw_bits(&self) -> u8 {

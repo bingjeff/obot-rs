@@ -35,7 +35,26 @@ impl HallElectricalAngle {
 
     #[inline(always)]
     pub fn sincos(self, count: i32) -> Sincos {
-        match rem_euclid_6(self.signed_electrical_count(count)) {
+        self.sincos_sector(rem_euclid_6(self.signed_electrical_count(count)) as u8)
+    }
+
+    #[inline(always)]
+    pub fn sincos_hall_count(self, hall_count: u8) -> Sincos {
+        let sector = if hall_count == 0 {
+            0
+        } else if self.phase_sign < 0 {
+            6 - hall_count
+        } else if hall_count == 6 {
+            0
+        } else {
+            hall_count
+        };
+        self.sincos_sector(sector)
+    }
+
+    #[inline(always)]
+    fn sincos_sector(self, sector: u8) -> Sincos {
+        match sector {
             0 => Sincos { sin: 0.0, cos: 1.0 },
             1 => Sincos {
                 sin: SQRT3_OVER_2,
@@ -76,6 +95,12 @@ fn rem_euclid_6(value: i32) -> i32 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HallSample {
+    pub count: i32,
+    pub hall_count: u8,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HallEncoder {
     count: i32,
@@ -91,6 +116,10 @@ impl HallEncoder {
     }
 
     pub fn read(&mut self, hall_bits: u8) -> i32 {
+        self.read_sample(hall_bits).count
+    }
+
+    pub fn read_sample(&mut self, hall_bits: u8) -> HallSample {
         let hall_count = HALL_TABLE[(hall_bits & 0x07) as usize];
         if hall_count != 0 {
             let mut diff = hall_count as i8 - self.last_hall_count as i8;
@@ -102,7 +131,10 @@ impl HallEncoder {
             }
             self.count += diff as i32;
         }
-        self.count
+        HallSample {
+            count: self.count,
+            hall_count: self.last_hall_count,
+        }
     }
 
     pub fn count(&self) -> i32 {
@@ -160,6 +192,22 @@ mod tests {
         assert_close(angle.sincos(2).cos, -0.5);
         assert_close(angle.sincos(3).sin, 0.0);
         assert_close(angle.sincos(3).cos, -1.0);
+        assert_close(angle.sincos_hall_count(1).sin, -0.866_025_4);
+        assert_close(angle.sincos_hall_count(1).cos, 0.5);
+        assert_close(angle.sincos_hall_count(6).sin, 0.0);
+        assert_close(angle.sincos_hall_count(6).cos, 1.0);
+    }
+
+    #[test]
+    fn read_sample_exposes_last_valid_hall_sector() {
+        let mut encoder = HallEncoder::new();
+        assert_eq!(encoder.read_sample(0).hall_count, 0);
+        let sample = encoder.read_sample(1);
+        assert_eq!(sample.count, 1);
+        assert_eq!(sample.hall_count, 1);
+        let invalid = encoder.read_sample(7);
+        assert_eq!(invalid.count, 1);
+        assert_eq!(invalid.hall_count, 1);
     }
 
     fn assert_close(actual: f32, expected: f32) {
