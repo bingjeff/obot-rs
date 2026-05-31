@@ -175,62 +175,6 @@ pub fn interrupt() {
     }
 }
 
-pub fn interrupt_count() -> u32 {
-    USB_LP_INTERRUPT_COUNT.load(Ordering::Relaxed)
-}
-
-pub fn error_count() -> u32 {
-    USB_ERROR_COUNT.load(Ordering::Relaxed)
-}
-
-pub fn text_rx_total() -> u32 {
-    TEXT_RX_TOTAL.load(Ordering::Relaxed)
-}
-
-pub fn text_rx_unsupported() -> u32 {
-    TEXT_RX_UNSUPPORTED.load(Ordering::Relaxed)
-}
-
-pub fn text_tx_total() -> u32 {
-    TEXT_TX_TOTAL.load(Ordering::Relaxed)
-}
-
-pub fn text_tx_busy() -> u32 {
-    TEXT_TX_BUSY.load(Ordering::Relaxed)
-}
-
-pub fn text_rx_last_len() -> u8 {
-    TEXT_RX_LAST_LEN.load(Ordering::Relaxed)
-}
-
-pub fn text_tx_last_len() -> u8 {
-    TEXT_TX_LAST_LEN.load(Ordering::Relaxed)
-}
-
-pub fn realtime_rx_total() -> u32 {
-    REALTIME_RX_TOTAL.load(Ordering::Relaxed)
-}
-
-pub fn realtime_rx_accepted() -> u32 {
-    REALTIME_RX_ACCEPTED.load(Ordering::Relaxed)
-}
-
-pub fn realtime_rx_unsupported() -> u32 {
-    REALTIME_RX_UNSUPPORTED.load(Ordering::Relaxed)
-}
-
-pub fn realtime_tx_total() -> u32 {
-    REALTIME_TX_TOTAL.load(Ordering::Relaxed)
-}
-
-pub fn realtime_tx_busy() -> u32 {
-    REALTIME_TX_BUSY.load(Ordering::Relaxed)
-}
-
-pub fn realtime_rx_last_len() -> u8 {
-    REALTIME_RX_LAST_LEN.load(Ordering::Relaxed)
-}
-
 pub fn poll_realtime_command() -> Option<CommandPacket> {
     let consumed = REALTIME_COMMAND_CONSUMED_VERSION.load(Ordering::Relaxed);
     let mut version = REALTIME_COMMAND_VERSION.load(Ordering::Acquire);
@@ -431,20 +375,6 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "t_period_fastloop",
     "t_exec_mainloop",
     "t_period_mainloop",
-    "usb_interrupt_count",
-    "usb_error_count",
-    "usb_text_rx_total",
-    "usb_text_rx_unsupported",
-    "usb_text_tx_total",
-    "usb_text_tx_busy",
-    "usb_text_rx_last_len",
-    "usb_text_tx_last_len",
-    "usb_realtime_rx_total",
-    "usb_realtime_rx_accepted",
-    "usb_realtime_rx_unsupported",
-    "usb_realtime_tx_total",
-    "usb_realtime_tx_busy",
-    "usb_realtime_rx_last_len",
 ];
 
 fn send_text_api_response_immediate(request: &[u8]) {
@@ -493,20 +423,6 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
         b"t_period_mainloop" => {
             write_u32_decimal(BENCH_T_PERIOD_MAINLOOP.load(Ordering::Relaxed), output)
         }
-        b"usb_interrupt_count" => write_u32_decimal(interrupt_count(), output),
-        b"usb_error_count" => write_u32_decimal(error_count(), output),
-        b"usb_text_rx_total" => write_u32_decimal(text_rx_total(), output),
-        b"usb_text_rx_unsupported" => write_u32_decimal(text_rx_unsupported(), output),
-        b"usb_text_tx_total" => write_u32_decimal(text_tx_total(), output),
-        b"usb_text_tx_busy" => write_u32_decimal(text_tx_busy(), output),
-        b"usb_text_rx_last_len" => write_u32_decimal(text_rx_last_len() as u32, output),
-        b"usb_text_tx_last_len" => write_u32_decimal(text_tx_last_len() as u32, output),
-        b"usb_realtime_rx_total" => write_u32_decimal(realtime_rx_total(), output),
-        b"usb_realtime_rx_accepted" => write_u32_decimal(realtime_rx_accepted(), output),
-        b"usb_realtime_rx_unsupported" => write_u32_decimal(realtime_rx_unsupported(), output),
-        b"usb_realtime_tx_total" => write_u32_decimal(realtime_tx_total(), output),
-        b"usb_realtime_tx_busy" => write_u32_decimal(realtime_tx_busy(), output),
-        b"usb_realtime_rx_last_len" => write_u32_decimal(realtime_rx_last_len() as u32, output),
         _ => None,
     }
 }
@@ -853,7 +769,7 @@ mod tests {
 
         let mut output = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
         let len = format_text_api_response(b"api_length", &mut output).unwrap();
-        assert_eq!(&output[..len], b"22");
+        assert_eq!(&output[..len], b"8");
 
         let len = format_text_api_response(b"api_name=4", &mut output).unwrap();
         assert_eq!(&output[..len], b"t_exec_fastloop");

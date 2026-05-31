@@ -381,20 +381,6 @@ const TEXT_API_NAMES: &[&str] = &[
     "transfer_error_mask",
     "status_before",
     "status_after",
-    "usb_interrupt_count",
-    "usb_error_count",
-    "usb_text_rx_total",
-    "usb_text_rx_unsupported",
-    "usb_text_tx_total",
-    "usb_text_tx_busy",
-    "usb_text_rx_last_len",
-    "usb_text_tx_last_len",
-    "usb_realtime_rx_total",
-    "usb_realtime_rx_accepted",
-    "usb_realtime_rx_unsupported",
-    "usb_realtime_tx_total",
-    "usb_realtime_tx_busy",
-    "usb_realtime_rx_last_len",
 ];
 
 #[cfg(target_os = "none")]
@@ -534,20 +520,6 @@ fn format_firmware_text_api_value<'out>(
                 .status_after
                 .map_or(0, |status| status.as_u32()),
         ),
-        "usb_interrupt_count" => ApiValue::U32(obot_g474::usb::interrupt_count()),
-        "usb_error_count" => ApiValue::U32(obot_g474::usb::error_count()),
-        "usb_text_rx_total" => ApiValue::U32(obot_g474::usb::text_rx_total()),
-        "usb_text_rx_unsupported" => ApiValue::U32(obot_g474::usb::text_rx_unsupported()),
-        "usb_text_tx_total" => ApiValue::U32(obot_g474::usb::text_tx_total()),
-        "usb_text_tx_busy" => ApiValue::U32(obot_g474::usb::text_tx_busy()),
-        "usb_text_rx_last_len" => ApiValue::U8(obot_g474::usb::text_rx_last_len()),
-        "usb_text_tx_last_len" => ApiValue::U8(obot_g474::usb::text_tx_last_len()),
-        "usb_realtime_rx_total" => ApiValue::U32(obot_g474::usb::realtime_rx_total()),
-        "usb_realtime_rx_accepted" => ApiValue::U32(obot_g474::usb::realtime_rx_accepted()),
-        "usb_realtime_rx_unsupported" => ApiValue::U32(obot_g474::usb::realtime_rx_unsupported()),
-        "usb_realtime_tx_total" => ApiValue::U32(obot_g474::usb::realtime_tx_total()),
-        "usb_realtime_tx_busy" => ApiValue::U32(obot_g474::usb::realtime_tx_busy()),
-        "usb_realtime_rx_last_len" => ApiValue::U8(obot_g474::usb::realtime_rx_last_len()),
         _ => return Err(ApiDispatchError::UnknownName),
     };
 
