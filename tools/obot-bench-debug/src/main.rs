@@ -113,6 +113,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "write-command-jlink" => write_command_jlink_command(rest),
         "write-command-usb" => write_command_usb_command(rest),
         "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
+        "write-driver-command-usb" => write_driver_command_usb_command(rest),
         "jlink-script" => jlink_script_command(rest),
         "--help" | "-h" | "help" => Ok(usage()),
         other => Err(format!("unknown command `{other}`")),
@@ -447,6 +448,16 @@ fn write_command_usb_command(args: &[String]) -> Result<String, String> {
     Ok(format_status_csv(DEFAULT_NAME, status))
 }
 
+fn write_driver_command_usb_command(args: &[String]) -> Result<String, String> {
+    let options = DriverCommandUsbOptions::parse(args)?;
+    let packet = DriverCommandPacket {
+        sequence: options.sequence,
+        command: options.command,
+    };
+    let status = transact_driver_command_usb(&options, packet)?;
+    Ok(format_status_csv(DEFAULT_NAME, status))
+}
+
 fn write_driver_command_jlink_command(args: &[String]) -> Result<String, String> {
     let options = DriverCommandWriteOptions::parse(args)?.resolve()?;
     let packet = DriverCommandPacket {
@@ -747,6 +758,14 @@ struct RealtimeUsbOptions {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct DriverCommandUsbOptions {
+    device_path: Option<PathBuf>,
+    sequence: u8,
+    command: DriverCommand,
+    timeout_ms: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct TextApiUsbOptions {
     device_path: Option<PathBuf>,
     request: String,
@@ -953,6 +972,56 @@ impl UsbRunStatsOptions {
         if options.samples == 0 {
             return Err("run-stats-usb requires at least one sample".to_string());
         }
+        Ok(options)
+    }
+
+    fn resolved_device_path(&self) -> Result<PathBuf, String> {
+        resolve_usb_device_path(self.device_path.as_ref())
+    }
+}
+
+impl DriverCommandUsbOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            device_path: None,
+            sequence: 1,
+            command: DriverCommand::Disable,
+            timeout_ms: DEFAULT_USB_TIMEOUT_MS,
+        };
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--dev" | "--device-path" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--dev requires a value".to_string())?;
+                    options.device_path = Some(PathBuf::from(path));
+                }
+                "--sequence" => {
+                    index += 1;
+                    let sequence = parse_u32_arg(args.get(index), "--sequence")?;
+                    options.sequence = sequence
+                        .try_into()
+                        .map_err(|_| "--sequence must fit in u8".to_string())?;
+                }
+                "--command" => {
+                    index += 1;
+                    let command = args
+                        .get(index)
+                        .ok_or_else(|| "--command requires a value".to_string())?;
+                    options.command = parse_driver_command(command)?;
+                }
+                "--timeout-ms" => {
+                    index += 1;
+                    options.timeout_ms = parse_u32_arg(args.get(index), "--timeout-ms")?;
+                }
+                other => return Err(format!("unknown option `{other}`")),
+            }
+            index += 1;
+        }
+
         Ok(options)
     }
 
@@ -1255,31 +1324,47 @@ fn transact_realtime_usb(
     options: &RealtimeUsbOptions,
     packet: CommandPacket,
 ) -> Result<StatusPacket, String> {
-    let device_path = options.resolved_device_path()?;
+    let mut command = packet.encode();
+    transact_usb_status_packet(
+        options.resolved_device_path()?,
+        &mut command,
+        options.timeout_ms,
+        "realtime command",
+    )
+}
+
+fn transact_driver_command_usb(
+    options: &DriverCommandUsbOptions,
+    packet: DriverCommandPacket,
+) -> Result<StatusPacket, String> {
+    let mut command = packet.encode();
+    transact_usb_status_packet(
+        options.resolved_device_path()?,
+        &mut command,
+        options.timeout_ms,
+        "driver command",
+    )
+}
+
+fn transact_usb_status_packet(
+    device_path: PathBuf,
+    command: &mut [u8],
+    timeout_ms: u32,
+    label: &str,
+) -> Result<StatusPacket, String> {
     let file = open_usb_device(&device_path)?;
     let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
 
-    let mut command = packet.encode();
-    let written = usbfs_bulk_transfer(
-        &file,
-        USB_REALTIME_OUT_ENDPOINT,
-        &mut command,
-        options.timeout_ms,
-    )?;
+    let written = usbfs_bulk_transfer(&file, USB_REALTIME_OUT_ENDPOINT, command, timeout_ms)?;
     if written != command.len() {
         return Err(format!(
-            "short realtime command write: wrote {written} of {} bytes",
+            "short {label} write: wrote {written} of {} bytes",
             command.len()
         ));
     }
 
     let mut response = [0; STATUS_PACKET_LEN];
-    let read = usbfs_bulk_transfer(
-        &file,
-        USB_REALTIME_IN_ENDPOINT,
-        &mut response,
-        options.timeout_ms,
-    )?;
+    let read = usbfs_bulk_transfer(&file, USB_REALTIME_IN_ENDPOINT, &mut response, timeout_ms)?;
     if read != STATUS_PACKET_LEN {
         return Err(format!(
             "short realtime status read: read {read} of {STATUS_PACKET_LEN} bytes"
@@ -2587,6 +2672,7 @@ fn usage() -> String {
   obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
   obot-bench-debug write-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad] [--timeout-ms N]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
+  obot-bench-debug write-driver-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command disable|configure-enable] [--timeout-ms N]
 ",
         BENCHMARK_PACKET_LEN,
         BENCHMARK_PACKET_LEN,
@@ -3154,6 +3240,29 @@ mod tests {
 
         assert!(output.contains("combined_max, 9995, 9995, 58.79, 58.79, fail"));
         assert!(output.contains("combined_mean, 7100.315, 7100.315, 41.77, 41.77, fail"));
+    }
+
+    #[test]
+    fn parses_driver_command_usb_options() {
+        let options = DriverCommandUsbOptions::parse(&[
+            "--dev".to_string(),
+            "/dev/bus/usb/001/043".to_string(),
+            "--sequence".to_string(),
+            "88".to_string(),
+            "--command".to_string(),
+            "configure-enable".to_string(),
+            "--timeout-ms".to_string(),
+            "250".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            options.device_path,
+            Some(PathBuf::from("/dev/bus/usb/001/043"))
+        );
+        assert_eq!(options.sequence, 88);
+        assert_eq!(options.command, DriverCommand::ConfigureEnable);
+        assert_eq!(options.timeout_ms, 250);
     }
 
     #[test]

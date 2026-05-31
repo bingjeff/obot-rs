@@ -3,7 +3,8 @@ use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use obot_core::{benchmark::BenchmarkReport, output::OutputSafetyStatus};
 use obot_protocol::{
-    COMMAND_PACKET_LEN, CommandPacket, STATUS_PACKET_LEN, StatusPacket,
+    COMMAND_PACKET_LEN, CommandPacket, DRIVER_COMMAND_PACKET_LEN, DriverCommandPacket,
+    STATUS_PACKET_LEN, StatusPacket,
     usb_control::{self, ControlRequest, ControlResponse, SetupPacket},
 };
 
@@ -125,6 +126,8 @@ static TEXT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static TEXT_TX_BUSY: AtomicU32 = AtomicU32::new(0);
 static REALTIME_COMMAND_VERSION: AtomicU32 = AtomicU32::new(0);
 static REALTIME_COMMAND_CONSUMED_VERSION: AtomicU32 = AtomicU32::new(0);
+static DRIVER_COMMAND_VERSION: AtomicU32 = AtomicU32::new(0);
+static DRIVER_COMMAND_CONSUMED_VERSION: AtomicU32 = AtomicU32::new(0);
 static REALTIME_RX_LAST_LEN: AtomicU8 = AtomicU8::new(0);
 static REALTIME_RX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static REALTIME_RX_ACCEPTED: AtomicU32 = AtomicU32::new(0);
@@ -133,6 +136,8 @@ static REALTIME_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static REALTIME_TX_BUSY: AtomicU32 = AtomicU32::new(0);
 static REALTIME_COMMAND_BYTES: [AtomicU8; COMMAND_PACKET_LEN] =
     [const { AtomicU8::new(0) }; COMMAND_PACKET_LEN];
+static DRIVER_COMMAND_BYTES: [AtomicU8; DRIVER_COMMAND_PACKET_LEN] =
+    [const { AtomicU8::new(0) }; DRIVER_COMMAND_PACKET_LEN];
 static REALTIME_STATUS_BYTES: [AtomicU8; STATUS_PACKET_LEN] =
     [const { AtomicU8::new(0) }; STATUS_PACKET_LEN];
 static BENCH_T_EXEC_FASTLOOP: AtomicU32 = AtomicU32::new(0);
@@ -193,21 +198,44 @@ pub fn interrupt() {
 }
 
 pub fn poll_realtime_command() -> Option<CommandPacket> {
-    let consumed = REALTIME_COMMAND_CONSUMED_VERSION.load(Ordering::Relaxed);
-    let mut version = REALTIME_COMMAND_VERSION.load(Ordering::Acquire);
+    poll_versioned_packet::<COMMAND_PACKET_LEN, CommandPacket>(
+        &REALTIME_COMMAND_VERSION,
+        &REALTIME_COMMAND_CONSUMED_VERSION,
+        &REALTIME_COMMAND_BYTES,
+        CommandPacket::decode,
+    )
+}
+
+pub fn poll_driver_command() -> Option<DriverCommandPacket> {
+    poll_versioned_packet::<DRIVER_COMMAND_PACKET_LEN, DriverCommandPacket>(
+        &DRIVER_COMMAND_VERSION,
+        &DRIVER_COMMAND_CONSUMED_VERSION,
+        &DRIVER_COMMAND_BYTES,
+        DriverCommandPacket::decode,
+    )
+}
+
+fn poll_versioned_packet<const N: usize, T>(
+    version_storage: &AtomicU32,
+    consumed_storage: &AtomicU32,
+    packet_storage: &[AtomicU8; N],
+    decode: impl Fn(&[u8]) -> Result<T, obot_protocol::DecodeError>,
+) -> Option<T> {
+    let consumed = consumed_storage.load(Ordering::Relaxed);
+    let mut version = version_storage.load(Ordering::Acquire);
     if version == consumed || version & 1 != 0 {
         return None;
     }
 
     for _ in 0..3 {
-        let mut bytes = [0; COMMAND_PACKET_LEN];
-        for (byte, storage) in bytes.iter_mut().zip(REALTIME_COMMAND_BYTES.iter()) {
+        let mut bytes = [0; N];
+        for (byte, storage) in bytes.iter_mut().zip(packet_storage.iter()) {
             *byte = storage.load(Ordering::Relaxed);
         }
-        let check = REALTIME_COMMAND_VERSION.load(Ordering::Acquire);
+        let check = version_storage.load(Ordering::Acquire);
         if check == version {
-            REALTIME_COMMAND_CONSUMED_VERSION.store(version, Ordering::Release);
-            return CommandPacket::decode(&bytes).ok();
+            consumed_storage.store(version, Ordering::Release);
+            return decode(&bytes).ok();
         }
 
         version = check;
@@ -383,26 +411,52 @@ fn handle_realtime_endpoint_transfer(istr: u16) {
         );
         REALTIME_RX_LAST_LEN.store(len as u8, Ordering::Relaxed);
         REALTIME_RX_TOTAL.fetch_add(1, Ordering::Relaxed);
-        let accepted = if len == COMMAND_PACKET_LEN {
-            let mut bytes = [0; COMMAND_PACKET_LEN];
-            read_pma_bytes(EP2_RX_OFFSET, &mut bytes, COMMAND_PACKET_LEN);
-            let version = REALTIME_COMMAND_VERSION.load(Ordering::Relaxed);
-            REALTIME_COMMAND_VERSION.store(version.wrapping_add(1) | 1, Ordering::Release);
-            for (storage, byte) in REALTIME_COMMAND_BYTES.iter().zip(bytes) {
-                storage.store(byte, Ordering::Relaxed);
+        let accepted = match len {
+            COMMAND_PACKET_LEN => {
+                accept_realtime_command_packet();
+                true
             }
-            REALTIME_COMMAND_VERSION.store(version.wrapping_add(2) & !1, Ordering::Release);
-            REALTIME_RX_ACCEPTED.fetch_add(1, Ordering::Relaxed);
-            true
-        } else {
-            REALTIME_RX_UNSUPPORTED.fetch_add(1, Ordering::Relaxed);
-            false
+            DRIVER_COMMAND_PACKET_LEN => {
+                accept_driver_command_packet();
+                true
+            }
+            _ => {
+                REALTIME_RX_UNSUPPORTED.fetch_add(1, Ordering::Relaxed);
+                false
+            }
         };
         endpoint_set_toggle(2, USB_EP_RX_VALID, USB_EPRX_STAT);
         if accepted {
             send_realtime_status_snapshot();
         }
     }
+}
+
+fn accept_realtime_command_packet() {
+    let mut bytes = [0; COMMAND_PACKET_LEN];
+    read_pma_bytes(EP2_RX_OFFSET, &mut bytes, COMMAND_PACKET_LEN);
+    publish_versioned_packet(&REALTIME_COMMAND_VERSION, &REALTIME_COMMAND_BYTES, &bytes);
+    REALTIME_RX_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+}
+
+fn accept_driver_command_packet() {
+    let mut bytes = [0; DRIVER_COMMAND_PACKET_LEN];
+    read_pma_bytes(EP2_RX_OFFSET, &mut bytes, DRIVER_COMMAND_PACKET_LEN);
+    publish_versioned_packet(&DRIVER_COMMAND_VERSION, &DRIVER_COMMAND_BYTES, &bytes);
+    REALTIME_RX_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+}
+
+fn publish_versioned_packet<const N: usize>(
+    version_storage: &AtomicU32,
+    packet_storage: &[AtomicU8; N],
+    bytes: &[u8; N],
+) {
+    let version = version_storage.load(Ordering::Relaxed);
+    version_storage.store(version.wrapping_add(1) | 1, Ordering::Release);
+    for (storage, byte) in packet_storage.iter().zip(bytes) {
+        storage.store(*byte, Ordering::Relaxed);
+    }
+    version_storage.store(version.wrapping_add(2) & !1, Ordering::Release);
 }
 
 fn send_realtime_status_snapshot() {

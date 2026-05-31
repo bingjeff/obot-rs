@@ -581,7 +581,8 @@ fn service_driver_debug(
     command_sequence: &mut u8,
     report_sequence: &mut u8,
 ) -> Option<Drv8323sConfigReport> {
-    let packet = debug_report::poll_driver_command(command_sequence)?;
+    let packet = obot_g474::usb::poll_driver_command()
+        .or_else(|| debug_report::poll_driver_command(command_sequence))?;
 
     let report = match packet.command {
         DriverCommand::Disable => {

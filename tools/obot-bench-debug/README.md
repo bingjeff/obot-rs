@@ -108,8 +108,13 @@ To send the same Rust-owned command packet over the USB realtime endpoint and re
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-command-usb --sequence 1 --mode disabled
 ```
 
-If more than one OBOT controller is attached, pass the exact `/dev/bus/usb` path reported by `lsusb` with `--dev /dev/bus/usb/<bus>/<dev>`. This uses the Rust packet format on endpoint 2. It is intended for Rust firmware bring-up and is not a drop-in replacement for the original C++ realtime host protocol.
+DRV configure/disable commands can use the same USB endpoint. The command returns the immediate status response; read `driver_configured`, `transfer_error_mask`, and related USB text API fields after a short wait for the main-loop DRV result.
 
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-driver-command-usb --sequence 1 --command configure-enable
+```
+
+If more than one OBOT controller is attached, pass the exact `/dev/bus/usb` path reported by `lsusb` with `--dev /dev/bus/usb/<bus>/<dev>`. This uses the Rust packet format on endpoint 2. It is intended for Rust firmware bring-up and is not a drop-in replacement for the original C++ realtime host protocol.
 
 Status and driver report reads also resolve packet addresses from the ELF:
 
