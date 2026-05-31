@@ -49,6 +49,18 @@ const USB_TEXT_IN_ENDPOINT: u32 = 0x81;
 const USBDEVFS_BULK: c_ulong = 0xC018_5502;
 const USBDEVFS_CLAIMINTERFACE: c_ulong = 0x8004_550F;
 const USBDEVFS_RELEASEINTERFACE: c_ulong = 0x8004_5510;
+const HEAP_ALLOCATOR_SYMBOLS: &[&str] = &[
+    "__rust_alloc",
+    "__rust_dealloc",
+    "__rust_realloc",
+    "__rust_alloc_zeroed",
+    "__rust_alloc_error_handler",
+    "__rg_oom",
+    "__rdl_alloc",
+    "__rdl_dealloc",
+    "__rdl_realloc",
+    "__rdl_alloc_zeroed",
+];
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -83,6 +95,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "read-jlink-detail" => read_jlink_detail_command(rest),
         "run-stats-jlink" => run_stats_jlink_command(rest),
         "run-stats-usb" => run_stats_usb_command(rest),
+        "verify-no-heap" => verify_no_heap_command(rest),
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
         "read-output-safety-jlink" => read_output_safety_jlink_command(rest),
@@ -205,6 +218,24 @@ fn run_stats_jlink_command(args: &[String]) -> Result<String, String> {
     let jlink = options.resolve(BENCHMARK_PACKET_SYMBOL)?;
     let bytes = read_jlink_bytes(&jlink, BENCHMARK_PACKET_LEN)?;
     decode_packet_csv(&bytes)
+}
+
+fn verify_no_heap_command(args: &[String]) -> Result<String, String> {
+    let options = ElfOnlyOptions::parse(args)?;
+    let symbols = heap_allocator_symbols_in_elf(&options.elf_path)?;
+    if !symbols.is_empty() {
+        return Err(format!(
+            "firmware ELF `{}` references heap allocator symbols: {}",
+            options.elf_path.display(),
+            symbols.join(", ")
+        ));
+    }
+
+    Ok(format!(
+        "no heap allocator symbols found in {}
+",
+        options.elf_path.display()
+    ))
 }
 
 fn run_stats_usb_command(args: &[String]) -> Result<String, String> {
@@ -533,9 +564,39 @@ struct SymbolReadOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ElfOnlyOptions {
+    elf_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ApiSnapshotOptions {
     symbols: SymbolReadOptions,
     request: String,
+}
+
+impl ElfOnlyOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            elf_path: PathBuf::from(DEFAULT_ELF_PATH),
+        };
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--elf" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--elf requires a value".to_string())?;
+                    options.elf_path = PathBuf::from(path);
+                }
+                other => return Err(format!("unknown option `{other}`")),
+            }
+            index += 1;
+        }
+
+        Ok(options)
+    }
 }
 
 impl ApiSnapshotOptions {
@@ -1607,6 +1668,48 @@ fn resolve_optional_symbol_address(
     }
 }
 
+fn heap_allocator_symbols_in_elf(path: &Path) -> Result<Vec<String>, String> {
+    let output = run_llvm_nm(path)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "llvm-nm failed for `{}` with status {}
+stdout:
+{}
+stderr:
+{}",
+            path.display(),
+            output.status,
+            stdout,
+            stderr
+        ));
+    }
+
+    Ok(heap_allocator_symbols_in_nm_output(&stdout))
+}
+
+fn heap_allocator_symbols_in_nm_output(output: &str) -> Vec<String> {
+    let mut symbols = Vec::new();
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(first) = fields.next() else {
+            continue;
+        };
+        let symbol = match (fields.next(), fields.next()) {
+            (Some(_kind), Some(name)) => name,
+            (None, None) => first,
+            _ => continue,
+        };
+        if HEAP_ALLOCATOR_SYMBOLS.contains(&symbol) {
+            symbols.push(symbol.to_string());
+        }
+    }
+    symbols.sort();
+    symbols.dedup();
+    symbols
+}
+
 fn resolve_symbol_address(path: &Path, symbol: &str) -> Result<u32, String> {
     let output = run_llvm_nm(path)?;
 
@@ -2408,6 +2511,7 @@ fn usage() -> String {
   obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
+  obot-bench-debug verify-no-heap [--elf target/thumbv7em-none-eabihf/release/obot-g474]
   obot-bench-debug read-status-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <status-packet-address>] [--speed 4000]
   obot-bench-debug read-driver-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <driver-report-address>] [--speed 4000]
   obot-bench-debug read-output-safety-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <output-safety-address>] [--speed 4000]
@@ -2552,6 +2656,29 @@ mod tests {
         assert_eq!(
             parse_nm_symbol_address(output, BENCHMARK_PACKET_SYMBOL),
             Some(0x2000_0020)
+        );
+    }
+
+    #[test]
+    fn parses_elf_only_options() {
+        let options =
+            ElfOnlyOptions::parse(&["--elf".to_string(), "target/custom.elf".to_string()]).unwrap();
+
+        assert_eq!(options.elf_path, PathBuf::from("target/custom.elf"));
+    }
+
+    #[test]
+    fn detects_heap_allocator_symbols_in_nm_output() {
+        let output = "\
+08000000 T Reset
+00000000 T __rust_alloc
+00000000 U __rust_dealloc
+20000020 B OBOT_BENCHMARK_PACKET
+";
+
+        assert_eq!(
+            heap_allocator_symbols_in_nm_output(output),
+            ["__rust_alloc".to_string(), "__rust_dealloc".to_string()]
         );
     }
 

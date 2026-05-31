@@ -14,6 +14,12 @@ For a one-off read against a known packet address, use:
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink --address 0x20000020
 ```
 
+To verify the release ELF still has no heap allocator dependency:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- verify-no-heap --elf target/thumbv7em-none-eabihf/release/obot-g474
+```
+
 To inspect the generated J-Link command script without touching hardware:
 
 ```sh
