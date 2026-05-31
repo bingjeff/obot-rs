@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod benchmark;
+pub mod current;
 pub mod hall;
 pub mod timing;
 

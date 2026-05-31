@@ -1,3 +1,5 @@
+use obot_core::current::RawCurrentSamples;
+
 use core::{
     hint::spin_loop,
     ptr::{read_volatile, write_volatile},
@@ -59,12 +61,7 @@ const ADC_SAMPLE_12_5_CYCLES: u32 = 2;
 
 const WAIT_ITERATIONS: u32 = 1_000_000;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CurrentSamples {
-    pub phase_a: u16,
-    pub phase_b: u16,
-    pub phase_c: u16,
-}
+pub type CurrentSamples = RawCurrentSamples;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentAdcError {

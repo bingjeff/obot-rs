@@ -15,6 +15,7 @@ use core::panic::PanicInfo;
 use obot_core::benchmark::{BenchmarkReport, LoopBenchmark};
 use obot_core::{
     Controller, Limits,
+    current::CurrentCalibration,
     timing::{LoopScheduler, LoopTiming},
 };
 #[cfg(target_os = "none")]
@@ -74,6 +75,7 @@ fn firmware_main() -> ! {
             core::hint::spin_loop();
         },
     };
+    let current_calibration = CurrentCalibration::MOTOR_HALL;
 
     let _ = controller.state();
     core::hint::black_box(pwm.config());
@@ -84,7 +86,7 @@ fn firmware_main() -> ! {
             run_measured_loop(&mut fast_benchmark, &cycle_counter, || {
                 pwm.write_zero_voltage();
                 core::hint::black_box(hall.read_count());
-                core::hint::black_box(current_adc.read_samples());
+                core::hint::black_box(current_calibration.convert(current_adc.read_samples()));
                 core::hint::black_box(controller.state());
             });
         }
