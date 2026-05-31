@@ -157,7 +157,6 @@ fn firmware_main() -> ! {
         },
     };
     let bus_voltage_adc = current_adc;
-    let current_calibration = CurrentCalibration::MOTOR_HALL;
     let output_gate = OutputGate::MOTOR_HALL;
     let mut bus_voltage_raw = 0_u16;
     let mut output_allowed = false;
@@ -178,7 +177,6 @@ fn firmware_main() -> ! {
         pwm,
         hall,
         current_adc,
-        current_calibration,
         foc,
         foc_desired,
         output_allowed,
@@ -353,7 +351,6 @@ struct FastLoopContext {
     pwm: SafeZeroPwm,
     hall: HallInputs,
     current_adc: CurrentAdc,
-    current_calibration: CurrentCalibration,
     hall_count: i32,
     foc: FocController,
     foc_desired: obot_core::foc::FocDesired,
@@ -367,7 +364,6 @@ impl FastLoopContext {
         pwm: SafeZeroPwm,
         hall: HallInputs,
         current_adc: CurrentAdc,
-        current_calibration: CurrentCalibration,
         foc: FocController,
         foc_desired: obot_core::foc::FocDesired,
         output_allowed: bool,
@@ -378,7 +374,6 @@ impl FastLoopContext {
             pwm,
             hall,
             current_adc,
-            current_calibration,
             hall_count: 0,
             foc,
             foc_desired,
@@ -391,9 +386,7 @@ impl FastLoopContext {
         let hall_sample = self.hall.read_sample();
         self.hall_count = hall_sample.count;
         let hall_sincos = HallElectricalAngle::motor_hall_sincos_hall_count(hall_sample.hall_count);
-        let currents = self
-            .current_calibration
-            .convert(self.current_adc.read_samples());
+        let currents = CurrentCalibration::motor_hall_convert(self.current_adc.read_samples());
         let voltage_command = self.foc.step_voltage_command_with_sincos(
             self.foc_desired,
             currents,

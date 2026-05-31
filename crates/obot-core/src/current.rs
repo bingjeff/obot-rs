@@ -12,6 +12,11 @@ pub struct PhaseCurrents {
     pub phase_c: f32,
 }
 
+const MOTOR_HALL_CURRENT_GAIN: f32 = -3.3 / 4096.0 / (0.005 * 40.0);
+const MOTOR_HALL_BIAS_A: f32 = 0.321;
+const MOTOR_HALL_BIAS_B: f32 = 0.576;
+const MOTOR_HALL_BIAS_C: f32 = 0.263;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurrentCalibration {
     pub gain_a: f32,
@@ -24,13 +29,22 @@ pub struct CurrentCalibration {
 
 impl CurrentCalibration {
     pub const MOTOR_HALL: Self = Self {
-        gain_a: -3.3 / 4096.0 / (0.005 * 40.0),
-        gain_b: -3.3 / 4096.0 / (0.005 * 40.0),
-        gain_c: -3.3 / 4096.0 / (0.005 * 40.0),
-        bias_a: 0.321,
-        bias_b: 0.576,
-        bias_c: 0.263,
+        gain_a: MOTOR_HALL_CURRENT_GAIN,
+        gain_b: MOTOR_HALL_CURRENT_GAIN,
+        gain_c: MOTOR_HALL_CURRENT_GAIN,
+        bias_a: MOTOR_HALL_BIAS_A,
+        bias_b: MOTOR_HALL_BIAS_B,
+        bias_c: MOTOR_HALL_BIAS_C,
     };
+
+    #[inline(always)]
+    pub fn motor_hall_convert(raw: RawCurrentSamples) -> PhaseCurrents {
+        PhaseCurrents {
+            phase_a: convert_one(raw.phase_a, MOTOR_HALL_CURRENT_GAIN, MOTOR_HALL_BIAS_A),
+            phase_b: convert_one(raw.phase_b, MOTOR_HALL_CURRENT_GAIN, MOTOR_HALL_BIAS_B),
+            phase_c: convert_one(raw.phase_c, MOTOR_HALL_CURRENT_GAIN, MOTOR_HALL_BIAS_C),
+        }
+    }
 
     pub fn convert(self, raw: RawCurrentSamples) -> PhaseCurrents {
         PhaseCurrents {
@@ -81,13 +95,19 @@ mod tests {
             phase_b: 0x069f,
             phase_c: 0x05fc,
         });
+        let expected = PhaseCurrents {
+            phase_a: calibration.gain_a * (0x0331 as f32 - 2048.0) - calibration.bias_a,
+            phase_b: calibration.gain_b * (0x069f as f32 - 2048.0) - calibration.bias_b,
+            phase_c: calibration.gain_c * (0x05fc as f32 - 2048.0) - calibration.bias_c,
+        };
+        assert_currents_close(currents, expected);
         assert_currents_close(
-            currents,
-            PhaseCurrents {
-                phase_a: calibration.gain_a * (0x0331 as f32 - 2048.0) - calibration.bias_a,
-                phase_b: calibration.gain_b * (0x069f as f32 - 2048.0) - calibration.bias_b,
-                phase_c: calibration.gain_c * (0x05fc as f32 - 2048.0) - calibration.bias_c,
-            },
+            CurrentCalibration::motor_hall_convert(RawCurrentSamples {
+                phase_a: 0x0331,
+                phase_b: 0x069f,
+                phase_c: 0x05fc,
+            }),
+            expected,
         );
     }
 
