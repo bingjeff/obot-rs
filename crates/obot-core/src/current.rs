@@ -16,6 +16,13 @@ const MOTOR_HALL_CURRENT_GAIN: f32 = -3.3 / 4096.0 / (0.005 * 40.0);
 const MOTOR_HALL_BIAS_A: f32 = 0.321;
 const MOTOR_HALL_BIAS_B: f32 = 0.576;
 const MOTOR_HALL_BIAS_C: f32 = 0.263;
+const MOTOR_HALL_RAW_ZERO: f32 = 2048.0;
+const MOTOR_HALL_CURRENT_OFFSET_A: f32 =
+    -MOTOR_HALL_CURRENT_GAIN * MOTOR_HALL_RAW_ZERO - MOTOR_HALL_BIAS_A;
+const MOTOR_HALL_CURRENT_OFFSET_B: f32 =
+    -MOTOR_HALL_CURRENT_GAIN * MOTOR_HALL_RAW_ZERO - MOTOR_HALL_BIAS_B;
+const MOTOR_HALL_CURRENT_OFFSET_C: f32 =
+    -MOTOR_HALL_CURRENT_GAIN * MOTOR_HALL_RAW_ZERO - MOTOR_HALL_BIAS_C;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurrentCalibration {
@@ -40,9 +47,9 @@ impl CurrentCalibration {
     #[inline(always)]
     pub fn motor_hall_convert(raw: RawCurrentSamples) -> PhaseCurrents {
         PhaseCurrents {
-            phase_a: convert_one(raw.phase_a, MOTOR_HALL_CURRENT_GAIN, MOTOR_HALL_BIAS_A),
-            phase_b: convert_one(raw.phase_b, MOTOR_HALL_CURRENT_GAIN, MOTOR_HALL_BIAS_B),
-            phase_c: convert_one(raw.phase_c, MOTOR_HALL_CURRENT_GAIN, MOTOR_HALL_BIAS_C),
+            phase_a: motor_hall_convert_one(raw.phase_a, MOTOR_HALL_CURRENT_OFFSET_A),
+            phase_b: motor_hall_convert_one(raw.phase_b, MOTOR_HALL_CURRENT_OFFSET_B),
+            phase_c: motor_hall_convert_one(raw.phase_c, MOTOR_HALL_CURRENT_OFFSET_C),
         }
     }
 
@@ -59,6 +66,11 @@ impl CurrentCalibration {
         self.bias_b = zero_update_one(self.bias_b, self.gain_b, raw.phase_b, alpha);
         self.bias_c = zero_update_one(self.bias_c, self.gain_c, raw.phase_c, alpha);
     }
+}
+
+#[inline(always)]
+fn motor_hall_convert_one(raw: u16, offset: f32) -> f32 {
+    MOTOR_HALL_CURRENT_GAIN * raw as f32 + offset
 }
 
 fn convert_one(raw: u16, gain: f32, bias: f32) -> f32 {
