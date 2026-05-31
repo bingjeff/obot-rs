@@ -13,6 +13,7 @@ const HRTIM_COMMON_ADC1R: usize = HRTIM_COMMON_BASE + 0x3C;
 const HRTIM_COMMON_ADC2R: usize = HRTIM_COMMON_BASE + 0x40;
 const HRTIM_COMMON_DLLCR: usize = HRTIM_COMMON_BASE + 0x4C;
 const HRTIM_COMMON_ODISR: usize = HRTIM_COMMON_BASE + 0x18;
+const HRTIM_COMMON_ODSR: usize = HRTIM_COMMON_BASE + 0x1C;
 
 const HRTIM_TIMER_BASE: usize = HRTIM1_BASE + 0x80;
 const HRTIM_TIMER_STRIDE: usize = 0x80;
@@ -63,6 +64,7 @@ const HRTIM_DLLCR_CALEN: u32 = 1 << 1;
 const HRTIM_DLLCR_CALRTE_2048: u32 = 3 << 2;
 const HRTIM_ADC_TRIGGER_TIMER_F_PERIOD: u32 = 1 << 24;
 const HRTIM_DISABLE_ALL_OUTPUTS: u32 = 0x0FFF;
+const HRTIM_MOTOR_OUTPUTS: u32 = 0x0FC0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PwmConfig {
@@ -118,6 +120,14 @@ impl PhaseCompares {
 
 pub struct SafeZeroPwm {
     config: PwmConfig,
+    bridge_outputs_armed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BridgeOutputStatus {
+    pub disable_status: u32,
+    pub all_disabled: bool,
+    pub all_enabled: bool,
 }
 
 impl SafeZeroPwm {
@@ -126,6 +136,7 @@ impl SafeZeroPwm {
         disable_outputs();
         let pwm = Self {
             config: PwmConfig::MOTOR_HALL_SAFE_ZERO,
+            bridge_outputs_armed: false,
         };
         pwm.configure_timer(TIMER_D);
         pwm.configure_timer(TIMER_E);
@@ -178,6 +189,10 @@ impl SafeZeroPwm {
 
     pub fn config(&self) -> PwmConfig {
         self.config
+    }
+
+    pub fn bridge_output_status(&self) -> BridgeOutputStatus {
+        bridge_output_status(self.bridge_outputs_armed)
     }
 
     fn configure_timer(&self, timer: usize) {
@@ -251,6 +266,16 @@ fn enable_hrtim_clock() {
 #[inline(always)]
 fn disable_outputs() {
     write(HRTIM_COMMON_ODISR, HRTIM_DISABLE_ALL_OUTPUTS);
+}
+
+#[inline(always)]
+fn bridge_output_status(outputs_armed: bool) -> BridgeOutputStatus {
+    let disable_status = read(HRTIM_COMMON_ODSR) & HRTIM_MOTOR_OUTPUTS;
+    BridgeOutputStatus {
+        disable_status,
+        all_disabled: !outputs_armed,
+        all_enabled: outputs_armed,
+    }
 }
 
 fn start_motor_timers() {

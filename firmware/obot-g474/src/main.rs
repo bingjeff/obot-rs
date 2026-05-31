@@ -11,12 +11,14 @@ mod startup;
 
 #[cfg(target_os = "none")]
 use core::{cell::UnsafeCell, panic::PanicInfo};
+#[cfg(any(target_os = "none", test))]
+use obot_core::ControlMode;
 #[cfg(target_os = "none")]
 use obot_core::MotorCommand;
 #[cfg(target_os = "none")]
 use obot_core::benchmark::{BenchmarkReport, LoopBenchmark};
 use obot_core::{
-    ControlMode, Controller, Limits,
+    Controller, Limits,
     timing::{LoopScheduler, LoopTiming},
 };
 #[cfg(target_os = "none")]
@@ -40,7 +42,7 @@ use obot_g474::drv8323s::{Drv8323s, Drv8323sConfigReport};
 #[cfg(target_os = "none")]
 use obot_g474::hall::HallInputs;
 #[cfg(target_os = "none")]
-use obot_g474::pwm::SafeZeroPwm;
+use obot_g474::pwm::{BridgeOutputStatus, SafeZeroPwm};
 #[cfg(target_os = "none")]
 use obot_protocol::{
     BenchmarkPacket, BusVoltagePacket, DriverCommand, DriverReportPacket, OutputSafetyPacket,
@@ -186,6 +188,12 @@ fn firmware_main() -> ! {
                 output_allowed = output_safety_status.output_allowed;
                 output_safety_sequence =
                     publish_output_safety_report(output_safety_sequence, output_safety_status);
+                let bridge_output_status = pwm.bridge_output_status();
+                obot_g474::usb::publish_hrtim_output_status(
+                    bridge_output_status.disable_status,
+                    bridge_output_status.all_disabled,
+                    bridge_output_status.all_enabled,
+                );
                 service_text_api_debug(
                     &mut text_api_request_sequence,
                     last_benchmark_report,
@@ -193,6 +201,7 @@ fn firmware_main() -> ! {
                     last_driver_report,
                     output_safety_status,
                     bus_voltage_raw,
+                    bridge_output_status,
                 );
                 core::hint::black_box((host_poll, host_status, controller_state.fault));
             });
@@ -287,6 +296,7 @@ fn service_text_api_debug(
     driver_report: Drv8323sConfigReport,
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
+    bridge_output_status: BridgeOutputStatus,
 ) {
     let Some(packet) = debug_report::poll_text_api_request(request_sequence) else {
         return;
@@ -303,6 +313,7 @@ fn service_text_api_debug(
                 driver_report,
                 output_safety_status,
                 bus_voltage_raw,
+                bridge_output_status,
             ) {
                 Ok(response_text) => (TextApiResponseStatus::Ok, response_text.len(), response),
                 Err(error) => (text_api_response_status(error), 0, response),
@@ -376,6 +387,9 @@ const TEXT_API_NAMES: &[&str] = &[
     "bus_voltage_raw",
     "bus_voltage_volts",
     "bus_allows_output",
+    "bridge_output_disable_status",
+    "bridge_outputs_disabled",
+    "bridge_outputs_enabled",
     "driver_configured",
     "verify_error_mask",
     "transfer_error_mask",
@@ -392,6 +406,7 @@ fn dispatch_firmware_text_api<'out>(
     driver_report: Drv8323sConfigReport,
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
+    bridge_output_status: BridgeOutputStatus,
 ) -> Result<&'out str, ApiDispatchError> {
     match parse_request(request).map_err(ApiDispatchError::Parse)? {
         ApiRequest::Get { name } => format_firmware_text_api_value(
@@ -402,6 +417,7 @@ fn dispatch_firmware_text_api<'out>(
             driver_report,
             output_safety_status,
             bus_voltage_raw,
+            bridge_output_status,
         ),
         ApiRequest::Set { name, .. } => {
             if firmware_text_api_name_index(name).is_some() {
@@ -435,6 +451,7 @@ fn format_firmware_text_api_value<'out>(
     driver_report: Drv8323sConfigReport,
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
+    bridge_output_status: BridgeOutputStatus,
 ) -> Result<&'out str, ApiDispatchError> {
     let combined_max_cycles = 5 * benchmark_report.max_fast_loop_cycles() as u64
         + benchmark_report.max_main_loop_cycles() as u64;
@@ -507,6 +524,9 @@ fn format_firmware_text_api_value<'out>(
         "bus_allows_output" => {
             ApiValue::Bool(OutputGate::MOTOR_HALL.allows_output_raw(bus_voltage_raw))
         }
+        "bridge_output_disable_status" => ApiValue::U32(bridge_output_status.disable_status),
+        "bridge_outputs_disabled" => ApiValue::Bool(bridge_output_status.all_disabled),
+        "bridge_outputs_enabled" => ApiValue::Bool(bridge_output_status.all_enabled),
         "driver_configured" => ApiValue::Bool(driver_report.configured()),
         "verify_error_mask" => ApiValue::U16(driver_report.verify_error_mask),
         "transfer_error_mask" => ApiValue::U16(driver_report.transfer_error_mask),
@@ -659,6 +679,7 @@ fn apply_host_command(
     (command_allows_output, clear_faults_accepted)
 }
 
+#[cfg(any(target_os = "none", test))]
 fn mode_allows_output(mode: ControlMode) -> bool {
     matches!(
         mode,

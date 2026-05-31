@@ -809,6 +809,9 @@ struct UsbDriverCheckFields {
     bus_blocked: bool,
     driver_not_enabled: bool,
     bus_voltage_raw: u32,
+    bridge_output_disable_status: u32,
+    bridge_outputs_disabled: bool,
+    bridge_outputs_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1497,6 +1500,7 @@ fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckRes
         command: options.command.command,
     };
     let immediate_status = transact_driver_command_usb(&options.command, packet)?;
+    thread::sleep(Duration::from_millis(options.reset_settle_ms as u64));
     let device_path = options.command.resolved_device_path()?;
     let fields = poll_usb_driver_check_fields(&device_path, options)?;
     let report_observed = usb_driver_report_observed(fields);
@@ -1550,6 +1554,21 @@ fn read_usb_driver_check_fields(
         bus_blocked: text_api_usb_bool_on_file(&file, "bus_blocked", timeout_ms)?,
         driver_not_enabled: text_api_usb_bool_on_file(&file, "driver_not_enabled", timeout_ms)?,
         bus_voltage_raw: text_api_usb_u32_on_file(&file, "bus_voltage_raw", timeout_ms)?,
+        bridge_output_disable_status: text_api_usb_u32_on_file(
+            &file,
+            "bridge_output_disable_status",
+            timeout_ms,
+        )?,
+        bridge_outputs_disabled: text_api_usb_bool_on_file(
+            &file,
+            "bridge_outputs_disabled",
+            timeout_ms,
+        )?,
+        bridge_outputs_enabled: text_api_usb_bool_on_file(
+            &file,
+            "bridge_outputs_enabled",
+            timeout_ms,
+        )?,
     })
 }
 
@@ -1577,6 +1596,8 @@ fn driver_check_expectation_passed(
                 && !fields.output_allowed
                 && fields.bus_blocked
                 && fields.driver_not_enabled
+                && fields.bridge_outputs_disabled
+                && !fields.bridge_outputs_enabled
         }
         DriverCheckExpectation::PoweredReady => {
             report_observed
@@ -1587,6 +1608,8 @@ fn driver_check_expectation_passed(
                 && !fields.output_allowed
                 && !fields.bus_blocked
                 && !fields.driver_not_enabled
+                && fields.bridge_outputs_disabled
+                && !fields.bridge_outputs_enabled
         }
     }
 }
@@ -2639,7 +2662,7 @@ fn format_status_csv(name: &str, packet: StatusPacket) -> String {
 fn format_usb_driver_check_csv(name: &str, result: UsbDriverCheckResult) -> String {
     let fields = result.fields;
     format!(
-        "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw\n{}, {}, {}, {}, {}, {}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}, {}\n",
+        "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled\n{}, {}, {}, {}, {}, {}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}, {}, 0x{:04X}, {}, {}\n",
         name,
         format_driver_command(result.command),
         result.immediate_status.sequence,
@@ -2656,6 +2679,9 @@ fn format_usb_driver_check_csv(name: &str, result: UsbDriverCheckResult) -> Stri
         fields.bus_blocked,
         fields.driver_not_enabled,
         fields.bus_voltage_raw,
+        fields.bridge_output_disable_status,
+        fields.bridge_outputs_disabled,
+        fields.bridge_outputs_enabled,
     )
 }
 
@@ -3618,6 +3644,9 @@ mod tests {
                     bus_blocked: true,
                     driver_not_enabled: true,
                     bus_voltage_raw: 2,
+                    bridge_output_disable_status: 0,
+                    bridge_outputs_disabled: true,
+                    bridge_outputs_enabled: false,
                 },
                 report_observed: true,
                 expectation: DriverCheckExpectation::UnpoweredFailClosed,
@@ -3627,7 +3656,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw\nrust, configure_enable, 94, none, true, unpowered_fail_closed, true, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2\n"
+            "name, command, status_sequence, fault, report_observed, expectation, check_passed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw, bridge_output_disable_status, bridge_outputs_disabled, bridge_outputs_enabled\nrust, configure_enable, 94, none, true, unpowered_fail_closed, true, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2, 0x0000, true, false\n"
         );
     }
 
@@ -3643,6 +3672,9 @@ mod tests {
             bus_blocked: true,
             driver_not_enabled: true,
             bus_voltage_raw: 2,
+            bridge_output_disable_status: 0,
+            bridge_outputs_disabled: true,
+            bridge_outputs_enabled: false,
         };
         let powered_ready = UsbDriverCheckFields {
             driver_configured: true,
@@ -3654,6 +3686,9 @@ mod tests {
             bus_blocked: false,
             driver_not_enabled: false,
             bus_voltage_raw: 2500,
+            bridge_output_disable_status: 0,
+            bridge_outputs_disabled: true,
+            bridge_outputs_enabled: false,
         };
         let status = StatusPacket {
             sequence: 1,
@@ -3698,6 +3733,9 @@ mod tests {
             bus_blocked: true,
             driver_not_enabled: true,
             bus_voltage_raw: 2,
+            bridge_output_disable_status: 0,
+            bridge_outputs_disabled: true,
+            bridge_outputs_enabled: false,
         }));
         assert!(usb_driver_report_observed(UsbDriverCheckFields {
             driver_configured: false,
@@ -3709,6 +3747,9 @@ mod tests {
             bus_blocked: true,
             driver_not_enabled: true,
             bus_voltage_raw: 2,
+            bridge_output_disable_status: 0,
+            bridge_outputs_disabled: true,
+            bridge_outputs_enabled: false,
         }));
     }
 

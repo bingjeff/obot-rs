@@ -149,6 +149,8 @@ static BUS_VOLTAGE_RAW: AtomicU32 = AtomicU32::new(0);
 static DRIVER_CONFIGURED: AtomicU8 = AtomicU8::new(0);
 static DRIVER_VERIFY_ERROR_MASK: AtomicU32 = AtomicU32::new(0);
 static DRIVER_TRANSFER_ERROR_MASK: AtomicU32 = AtomicU32::new(0);
+static HRTIM_OUTPUT_DISABLE_STATUS: AtomicU32 = AtomicU32::new(0);
+static HRTIM_BRIDGE_OUTPUT_FLAGS: AtomicU32 = AtomicU32::new(BRIDGE_OUTPUTS_DISABLED_BIT);
 static DRIVER_STATUS_BEFORE: AtomicU32 = AtomicU32::new(0);
 static DRIVER_STATUS_AFTER: AtomicU32 = AtomicU32::new(0);
 
@@ -159,6 +161,8 @@ const DRIVER_NOT_ENABLED_BIT: u32 = 1 << 3;
 const DRIVER_FAULT_LATCHED_BIT: u32 = 1 << 4;
 const CONTROLLER_FAULTED_BIT: u32 = 1 << 5;
 const HOST_TIMED_OUT_BIT: u32 = 1 << 6;
+const BRIDGE_OUTPUTS_DISABLED_BIT: u32 = 1 << 0;
+const BRIDGE_OUTPUTS_ENABLED_BIT: u32 = 1 << 1;
 
 pub struct UsbDevice;
 
@@ -267,6 +271,19 @@ pub fn publish_output_safety_status(status: OutputSafetyStatus) {
 
 pub fn publish_bus_voltage_raw(raw: u16) {
     BUS_VOLTAGE_RAW.store(raw as u32, Ordering::Relaxed);
+}
+
+pub fn publish_hrtim_output_status(
+    disable_status: u32,
+    bridge_outputs_disabled: bool,
+    bridge_outputs_enabled: bool,
+) {
+    HRTIM_OUTPUT_DISABLE_STATUS.store(disable_status, Ordering::Relaxed);
+    HRTIM_BRIDGE_OUTPUT_FLAGS.store(
+        bool_flag(bridge_outputs_disabled, BRIDGE_OUTPUTS_DISABLED_BIT)
+            | bool_flag(bridge_outputs_enabled, BRIDGE_OUTPUTS_ENABLED_BIT),
+        Ordering::Relaxed,
+    );
 }
 
 pub fn publish_driver_report(report: Drv8323sConfigReport) {
@@ -490,11 +507,22 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "controller_faulted",
     "host_timed_out",
     "bus_voltage_raw",
+    "bridge_output_disable_status",
+    "bridge_outputs_disabled",
+    "bridge_outputs_enabled",
     "driver_configured",
     "verify_error_mask",
     "transfer_error_mask",
     "status_before",
     "status_after",
+    "realtime_rx_last_len",
+    "realtime_rx_total",
+    "realtime_rx_accepted",
+    "realtime_rx_unsupported",
+    "realtime_command_version",
+    "realtime_command_consumed_version",
+    "driver_command_version",
+    "driver_command_consumed_version",
 ];
 
 fn send_text_api_response_immediate(request: &[u8]) {
@@ -557,6 +585,11 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
         }
         b"host_timed_out" => write_bool(load_output_safety_flag(HOST_TIMED_OUT_BIT), output),
         b"bus_voltage_raw" => write_u32_decimal(BUS_VOLTAGE_RAW.load(Ordering::Relaxed), output),
+        b"bridge_output_disable_status" => {
+            write_u32_decimal(HRTIM_OUTPUT_DISABLE_STATUS.load(Ordering::Relaxed), output)
+        }
+        b"bridge_outputs_disabled" => write_bool(bridge_outputs_disabled(), output),
+        b"bridge_outputs_enabled" => write_bool(bridge_outputs_enabled(), output),
         b"driver_configured" => write_bool(DRIVER_CONFIGURED.load(Ordering::Relaxed) != 0, output),
         b"verify_error_mask" => {
             write_u32_decimal(DRIVER_VERIFY_ERROR_MASK.load(Ordering::Relaxed), output)
@@ -566,12 +599,46 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
         }
         b"status_before" => write_u32_decimal(DRIVER_STATUS_BEFORE.load(Ordering::Relaxed), output),
         b"status_after" => write_u32_decimal(DRIVER_STATUS_AFTER.load(Ordering::Relaxed), output),
+        b"realtime_rx_last_len" => {
+            write_u32_decimal(REALTIME_RX_LAST_LEN.load(Ordering::Relaxed) as u32, output)
+        }
+        b"realtime_rx_total" => {
+            write_u32_decimal(REALTIME_RX_TOTAL.load(Ordering::Relaxed), output)
+        }
+        b"realtime_rx_accepted" => {
+            write_u32_decimal(REALTIME_RX_ACCEPTED.load(Ordering::Relaxed), output)
+        }
+        b"realtime_rx_unsupported" => {
+            write_u32_decimal(REALTIME_RX_UNSUPPORTED.load(Ordering::Relaxed), output)
+        }
+        b"realtime_command_version" => {
+            write_u32_decimal(REALTIME_COMMAND_VERSION.load(Ordering::Relaxed), output)
+        }
+        b"realtime_command_consumed_version" => write_u32_decimal(
+            REALTIME_COMMAND_CONSUMED_VERSION.load(Ordering::Relaxed),
+            output,
+        ),
+        b"driver_command_version" => {
+            write_u32_decimal(DRIVER_COMMAND_VERSION.load(Ordering::Relaxed), output)
+        }
+        b"driver_command_consumed_version" => write_u32_decimal(
+            DRIVER_COMMAND_CONSUMED_VERSION.load(Ordering::Relaxed),
+            output,
+        ),
         _ => None,
     }
 }
 
 fn load_output_safety_flag(bit: u32) -> bool {
     OUTPUT_SAFETY_FLAGS.load(Ordering::Relaxed) & bit != 0
+}
+
+fn bridge_outputs_disabled() -> bool {
+    HRTIM_BRIDGE_OUTPUT_FLAGS.load(Ordering::Relaxed) & BRIDGE_OUTPUTS_DISABLED_BIT != 0
+}
+
+fn bridge_outputs_enabled() -> bool {
+    HRTIM_BRIDGE_OUTPUT_FLAGS.load(Ordering::Relaxed) & BRIDGE_OUTPUTS_ENABLED_BIT != 0
 }
 
 fn parse_decimal_usize(input: &[u8]) -> Option<usize> {
