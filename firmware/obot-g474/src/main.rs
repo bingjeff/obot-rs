@@ -29,7 +29,7 @@ use obot_core::{
 use obot_core::{
     current::CurrentCalibration,
     foc::{FocController, FocParam, MotorHallFocMap},
-    hall::HallElectricalAngle,
+    hall::{HallElectricalAngle, HallMotionEstimate, HallMotionEstimator},
     host::{HostCommandWatchdog, HostCommandWatchdogStatus},
     output::{OutputSafety, OutputSafetyInputs, OutputSafetyStatus},
     power::OutputGate,
@@ -156,6 +156,7 @@ fn firmware_main() -> ! {
     let mut bus_voltage_raw = 0_u16;
     let mut output_allowed = false;
     let hall_angle = HallElectricalAngle::MOTOR_HALL;
+    let mut hall_motion = HallMotionEstimator::new(42.0, -1.0, 10_000.0, 0.005);
     let foc_map = MotorHallFocMap::MOTOR_HALL;
     let mut foc_desired = foc_map.desired_from_state(obot_core::MotorState::default());
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
@@ -187,6 +188,12 @@ fn firmware_main() -> ! {
                     force_controller_disabled();
                 }
                 let controller_state = controller_storage_mut().state();
+                let hall_count = fast_loop_hall_count();
+                let hall_feedback = hall_motion.update(obot_core::hall::HallSample {
+                    count: hall_count,
+                    hall_count: 0,
+                });
+                obot_g474::usb::publish_hall_feedback(hall_feedback);
                 foc_desired = foc_map.desired_from_state(controller_state);
                 publish_status_report(status_sequence, controller_state);
                 status_sequence = status_sequence.wrapping_add(1);
@@ -230,6 +237,7 @@ fn firmware_main() -> ! {
                     last_driver_report,
                     output_safety_status,
                     bus_voltage_raw,
+                    hall_feedback,
                     bridge_output_status,
                     bridge_prearm_blockers,
                 );
@@ -320,6 +328,7 @@ struct FastLoopContext {
     current_adc: CurrentAdc,
     current_calibration: CurrentCalibration,
     hall_angle: HallElectricalAngle,
+    hall_count: i32,
     foc: FocController,
     foc_desired: obot_core::foc::FocDesired,
     output_allowed: bool,
@@ -346,6 +355,7 @@ impl FastLoopContext {
             current_adc,
             current_calibration,
             hall_angle,
+            hall_count: 0,
             foc,
             foc_desired,
             output_allowed,
@@ -355,6 +365,7 @@ impl FastLoopContext {
     fn run(&mut self) {
         let sample = self.benchmark.start(self.cycle_counter.now());
         let hall_sample = self.hall.read_sample();
+        self.hall_count = hall_sample.count;
         let hall_sincos = self.hall_angle.sincos_hall_count(hall_sample.hall_count);
         let currents = self
             .current_calibration
@@ -447,6 +458,15 @@ fn fast_loop_benchmark() -> LoopBenchmark {
 }
 
 #[cfg(target_os = "none")]
+fn fast_loop_hall_count() -> i32 {
+    interrupt_free(|| {
+        fast_loop_context_mut()
+            .map(|context| context.hall_count)
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(target_os = "none")]
 fn fast_loop_bridge_output_status() -> BridgeOutputStatus {
     interrupt_free(|| {
         fast_loop_context_mut()
@@ -532,6 +552,7 @@ fn service_text_api_debug(
     driver_report: Drv8323sConfigReport,
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
+    hall_feedback: HallMotionEstimate,
     bridge_output_status: BridgeOutputStatus,
     bridge_prearm_blockers: u32,
 ) {
@@ -550,6 +571,7 @@ fn service_text_api_debug(
                 driver_report,
                 output_safety_status,
                 bus_voltage_raw,
+                hall_feedback,
                 bridge_output_status,
                 bridge_prearm_blockers,
             ) {
@@ -615,6 +637,10 @@ const TEXT_API_NAMES: &[&str] = &[
     "torque_nm",
     "velocity_rad_s",
     "position_rad",
+    "motor_position_raw",
+    "motor_position_rad",
+    "motor_velocity_rad_s",
+    "motor_velocity_filtered_rad_s",
     "output_allowed",
     "command_blocked",
     "bus_blocked",
@@ -646,6 +672,7 @@ fn dispatch_firmware_text_api<'out>(
     driver_report: Drv8323sConfigReport,
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
+    hall_feedback: HallMotionEstimate,
     bridge_output_status: BridgeOutputStatus,
     bridge_prearm_blockers: u32,
 ) -> Result<&'out str, ApiDispatchError> {
@@ -658,6 +685,7 @@ fn dispatch_firmware_text_api<'out>(
             driver_report,
             output_safety_status,
             bus_voltage_raw,
+            hall_feedback,
             bridge_output_status,
             bridge_prearm_blockers,
         ),
@@ -693,6 +721,7 @@ fn format_firmware_text_api_value<'out>(
     driver_report: Drv8323sConfigReport,
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
+    hall_feedback: HallMotionEstimate,
     bridge_output_status: BridgeOutputStatus,
     bridge_prearm_blockers: u32,
 ) -> Result<&'out str, ApiDispatchError> {
@@ -755,6 +784,12 @@ fn format_firmware_text_api_value<'out>(
         "torque_nm" => ApiValue::Fixed3((controller_state.torque_nm * 1_000.0) as i64),
         "velocity_rad_s" => ApiValue::Fixed3((controller_state.velocity_rad_s * 1_000.0) as i64),
         "position_rad" => ApiValue::Fixed3((controller_state.position_rad * 1_000.0) as i64),
+        "motor_position_raw" => ApiValue::I32(hall_feedback.raw_count),
+        "motor_position_rad" => ApiValue::Fixed3((hall_feedback.position_rad * 1_000.0) as i64),
+        "motor_velocity_rad_s" => ApiValue::Fixed3((hall_feedback.velocity_rad_s * 1_000.0) as i64),
+        "motor_velocity_filtered_rad_s" => {
+            ApiValue::Fixed3((hall_feedback.velocity_filtered_rad_s * 1_000.0) as i64)
+        }
         "output_allowed" => ApiValue::Bool(output_safety_status.output_allowed),
         "command_blocked" => ApiValue::Bool(output_safety_status.command_blocked),
         "bus_blocked" => ApiValue::Bool(output_safety_status.bus_blocked),

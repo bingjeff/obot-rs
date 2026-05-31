@@ -2,6 +2,7 @@ const HALL_TABLE: [u8; 8] = [0, 1, 3, 2, 5, 6, 4, 0];
 
 const SQRT3_OVER_2: f32 = 0.866_025_4;
 const ELECTRICAL_RADIANS_PER_MOTOR_HALL_COUNT: f32 = core::f32::consts::PI / 3.0;
+const TWO_PI: f32 = 2.0 * core::f32::consts::PI;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Sincos {
@@ -101,6 +102,81 @@ pub struct HallSample {
     pub hall_count: u8,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HallMotionEstimate {
+    pub raw_count: i32,
+    pub position_rad: f32,
+    pub velocity_rad_s: f32,
+    pub velocity_filtered_rad_s: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HallMotionEstimator {
+    counts_per_revolution: f32,
+    direction: f32,
+    sample_frequency_hz: f32,
+    velocity_filter_alpha: f32,
+    last_count: i32,
+    initialized: bool,
+    estimate: HallMotionEstimate,
+}
+
+impl HallMotionEstimator {
+    pub const MOTOR_HALL: Self = Self::new(42.0, -1.0, 50_000.0, 0.001);
+
+    pub const fn new(
+        counts_per_revolution: f32,
+        direction: f32,
+        sample_frequency_hz: f32,
+        velocity_filter_alpha: f32,
+    ) -> Self {
+        Self {
+            counts_per_revolution,
+            direction,
+            sample_frequency_hz,
+            velocity_filter_alpha,
+            last_count: 0,
+            initialized: false,
+            estimate: HallMotionEstimate {
+                raw_count: 0,
+                position_rad: 0.0,
+                velocity_rad_s: 0.0,
+                velocity_filtered_rad_s: 0.0,
+            },
+        }
+    }
+
+    #[inline(always)]
+    pub fn update(&mut self, sample: HallSample) -> HallMotionEstimate {
+        let diff = if self.initialized {
+            sample.count - self.last_count
+        } else {
+            self.initialized = true;
+            0
+        };
+        self.last_count = sample.count;
+
+        let radians_per_count = TWO_PI / self.counts_per_revolution;
+        let position_rad = self.direction * sample.count as f32 * radians_per_count;
+        let velocity_rad_s =
+            self.direction * diff as f32 * radians_per_count * self.sample_frequency_hz;
+        let velocity_filtered_rad_s = self.estimate.velocity_filtered_rad_s
+            + self.velocity_filter_alpha * (velocity_rad_s - self.estimate.velocity_filtered_rad_s);
+
+        self.estimate = HallMotionEstimate {
+            raw_count: sample.count,
+            position_rad,
+            velocity_rad_s,
+            velocity_filtered_rad_s,
+        };
+        self.estimate
+    }
+
+    pub const fn estimate(&self) -> HallMotionEstimate {
+        self.estimate
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HallEncoder {
     count: i32,
@@ -152,7 +228,7 @@ impl Default for HallEncoder {
 
 #[cfg(test)]
 mod tests {
-    use super::HallEncoder;
+    use super::{HallEncoder, HallMotionEstimator};
 
     #[test]
     fn follows_cpp_forward_hall_table() {
@@ -210,6 +286,29 @@ mod tests {
         let invalid = encoder.read_sample(7);
         assert_eq!(invalid.count, 1);
         assert_eq!(invalid.hall_count, 1);
+    }
+
+    #[test]
+    fn hall_motion_estimator_matches_motor_hall_scale_and_direction() {
+        let mut estimator = HallMotionEstimator::MOTOR_HALL;
+
+        let first = estimator.update(super::HallSample {
+            count: 1,
+            hall_count: 1,
+        });
+        assert_eq!(first.raw_count, 1);
+        assert_close(first.position_rad, -2.0 * core::f32::consts::PI / 42.0);
+        assert_close(first.velocity_rad_s, 0.0);
+        assert_close(first.velocity_filtered_rad_s, 0.0);
+
+        let second = estimator.update(super::HallSample {
+            count: 2,
+            hall_count: 2,
+        });
+        let expected_velocity = -2.0 * core::f32::consts::PI / 42.0 * 50_000.0;
+        assert_close(second.position_rad, -4.0 * core::f32::consts::PI / 42.0);
+        assert_close(second.velocity_rad_s, expected_velocity);
+        assert_close(second.velocity_filtered_rad_s, expected_velocity * 0.001);
     }
 
     fn assert_close(actual: f32, expected: f32) {

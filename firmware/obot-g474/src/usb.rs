@@ -1,7 +1,7 @@
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 
-use obot_core::{benchmark::BenchmarkReport, output::OutputSafetyStatus};
+use obot_core::{benchmark::BenchmarkReport, hall::HallMotionEstimate, output::OutputSafetyStatus};
 use obot_protocol::{
     COMMAND_PACKET_LEN, CommandPacket, DRIVER_COMMAND_PACKET_LEN, DriverCommandPacket,
     STATUS_PACKET_LEN, StatusPacket,
@@ -146,6 +146,10 @@ static BENCH_T_EXEC_MAINLOOP: AtomicU32 = AtomicU32::new(0);
 static BENCH_T_PERIOD_MAINLOOP: AtomicU32 = AtomicU32::new(0);
 static OUTPUT_SAFETY_FLAGS: AtomicU32 = AtomicU32::new(0);
 static BUS_VOLTAGE_RAW: AtomicU32 = AtomicU32::new(0);
+static MOTOR_POSITION_RAW: AtomicI32 = AtomicI32::new(0);
+static MOTOR_POSITION_MILLIRAD: AtomicI32 = AtomicI32::new(0);
+static MOTOR_VELOCITY_MILLIRAD_S: AtomicI32 = AtomicI32::new(0);
+static MOTOR_VELOCITY_FILTERED_MILLIRAD_S: AtomicI32 = AtomicI32::new(0);
 static DRIVER_CONFIGURED: AtomicU8 = AtomicU8::new(0);
 static DRIVER_VERIFY_ERROR_MASK: AtomicU32 = AtomicU32::new(0);
 static DRIVER_TRANSFER_ERROR_MASK: AtomicU32 = AtomicU32::new(0);
@@ -277,6 +281,19 @@ pub fn publish_output_safety_status(status: OutputSafetyStatus) {
 
 pub fn publish_bus_voltage_raw(raw: u16) {
     BUS_VOLTAGE_RAW.store(raw as u32, Ordering::Relaxed);
+}
+
+pub fn publish_hall_feedback(feedback: HallMotionEstimate) {
+    MOTOR_POSITION_RAW.store(feedback.raw_count, Ordering::Relaxed);
+    MOTOR_POSITION_MILLIRAD.store((feedback.position_rad * 1_000.0) as i32, Ordering::Relaxed);
+    MOTOR_VELOCITY_MILLIRAD_S.store(
+        (feedback.velocity_rad_s * 1_000.0) as i32,
+        Ordering::Relaxed,
+    );
+    MOTOR_VELOCITY_FILTERED_MILLIRAD_S.store(
+        (feedback.velocity_filtered_rad_s * 1_000.0) as i32,
+        Ordering::Relaxed,
+    );
 }
 
 pub fn publish_hrtim_output_status(
@@ -518,6 +535,10 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "controller_faulted",
     "host_timed_out",
     "bus_voltage_raw",
+    "motor_position_raw",
+    "motor_position_rad",
+    "motor_velocity_rad_s",
+    "motor_velocity_filtered_rad_s",
     "bridge_output_disable_status",
     "bridge_outputs_disabled",
     "bridge_outputs_enabled",
@@ -599,6 +620,19 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
         }
         b"host_timed_out" => write_bool(load_output_safety_flag(HOST_TIMED_OUT_BIT), output),
         b"bus_voltage_raw" => write_u32_decimal(BUS_VOLTAGE_RAW.load(Ordering::Relaxed), output),
+        b"motor_position_raw" => {
+            write_i32_decimal(MOTOR_POSITION_RAW.load(Ordering::Relaxed), output)
+        }
+        b"motor_position_rad" => {
+            write_fixed3_milli_i32(MOTOR_POSITION_MILLIRAD.load(Ordering::Relaxed), output)
+        }
+        b"motor_velocity_rad_s" => {
+            write_fixed3_milli_i32(MOTOR_VELOCITY_MILLIRAD_S.load(Ordering::Relaxed), output)
+        }
+        b"motor_velocity_filtered_rad_s" => write_fixed3_milli_i32(
+            MOTOR_VELOCITY_FILTERED_MILLIRAD_S.load(Ordering::Relaxed),
+            output,
+        ),
         b"bridge_output_disable_status" => {
             write_u32_decimal(HRTIM_OUTPUT_DISABLE_STATUS.load(Ordering::Relaxed), output)
         }
@@ -716,6 +750,43 @@ fn write_u32_decimal(value: u32, output: &mut [u8]) -> Option<usize> {
         }
     }
     write_bytes(&scratch[index..], output)
+}
+
+fn write_i32_decimal(value: i32, output: &mut [u8]) -> Option<usize> {
+    if value < 0 {
+        if output.is_empty() {
+            return None;
+        }
+        output[0] = b'-';
+        let len = write_u32_decimal(value.unsigned_abs(), &mut output[1..])?;
+        Some(len + 1)
+    } else {
+        write_u32_decimal(value as u32, output)
+    }
+}
+
+fn write_fixed3_milli_i32(value: i32, output: &mut [u8]) -> Option<usize> {
+    let negative = value < 0;
+    let magnitude = value.unsigned_abs();
+    let whole = magnitude / 1_000;
+    let frac = magnitude % 1_000;
+    let mut len = 0;
+    if negative {
+        if output.is_empty() {
+            return None;
+        }
+        output[0] = b'-';
+        len = 1;
+    }
+    len += write_u32_decimal(whole, &mut output[len..])?;
+    if len + 4 > output.len() {
+        return None;
+    }
+    output[len] = b'.';
+    output[len + 1] = b'0' + ((frac / 100) % 10) as u8;
+    output[len + 2] = b'0' + ((frac / 10) % 10) as u8;
+    output[len + 3] = b'0' + (frac % 10) as u8;
+    Some(len + 4)
 }
 
 fn write_bytes(bytes: &[u8], output: &mut [u8]) -> Option<usize> {
@@ -1031,7 +1102,7 @@ mod tests {
 
         let mut output = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
         let len = format_text_api_response(b"api_length", &mut output).unwrap();
-        assert_eq!(&output[..len], b"21");
+        assert_eq!(&output[..len], b"25");
 
         let len = format_text_api_response(b"api_name=4", &mut output).unwrap();
         assert_eq!(&output[..len], b"t_exec_fastloop");
@@ -1044,6 +1115,21 @@ mod tests {
         assert_eq!(&output[..len], b"1116");
         let len = format_text_api_response(b"t_period_mainloop", &mut output).unwrap();
         assert_eq!(&output[..len], b"16995");
+
+        publish_hall_feedback(HallMotionEstimate {
+            raw_count: -2,
+            position_rad: -0.299_199_3,
+            velocity_rad_s: 7_479.982,
+            velocity_filtered_rad_s: 7.479_982,
+        });
+        let len = format_text_api_response(b"motor_position_raw", &mut output).unwrap();
+        assert_eq!(&output[..len], b"-2");
+        let len = format_text_api_response(b"motor_position_rad", &mut output).unwrap();
+        assert_eq!(&output[..len], b"-0.299");
+        let len = format_text_api_response(b"motor_velocity_rad_s", &mut output).unwrap();
+        assert_eq!(&output[..len], b"7479.981");
+        let len = format_text_api_response(b"motor_velocity_filtered_rad_s", &mut output).unwrap();
+        assert_eq!(&output[..len], b"7.479");
 
         assert_eq!(format_text_api_response(b"unknown", &mut output), None);
         assert_eq!(format_text_api_response(b"api_name=999", &mut output), None);
