@@ -5,5 +5,4 @@ pub mod adc;
 pub mod cycle_counter;
 #[cfg(target_os = "none")]
 pub mod hall;
-#[cfg(target_os = "none")]
 pub mod pwm;

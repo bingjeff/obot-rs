@@ -1,5 +1,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
+use obot_core::foc::FocVoltages;
+
 const RCC_BASE: usize = 0x4002_1000;
 const RCC_APB2ENR: usize = RCC_BASE + 0x60;
 const RCC_APB2ENR_HRTIM1EN: u32 = 1 << 26;
@@ -31,8 +33,15 @@ const HRTIM_PRESCALER: u32 = 32;
 const PWM_PERIOD: u32 = ((CPU_HZ as u64 * HRTIM_PRESCALER as u64) / 2 / PWM_HZ as u64) as u32;
 const PWM_ZERO_COMPARE: u32 = PWM_PERIOD / 2;
 const DEADTIME_NS: u32 = 200;
+const MIN_OFF_NS: u32 = 1_000;
+const MIN_ON_NS: u32 = 0;
+const NOMINAL_VBUS_V: f32 = 12.0;
 const HRTIM_COUNTS_PER_US: u32 = CPU_HZ / 1_000_000 * HRTIM_PRESCALER / 4;
 const DEADTIME_COUNTS: u32 = DEADTIME_NS * HRTIM_COUNTS_PER_US / 1_000;
+const MIN_OFF_COUNTS: u32 = 2 * MIN_OFF_NS * HRTIM_COUNTS_PER_US / 1_000;
+const MIN_ON_COUNTS: u32 = 2 * MIN_ON_NS * HRTIM_COUNTS_PER_US / 1_000;
+const PWM_MIN_COMPARE: u32 = MIN_OFF_COUNTS;
+const PWM_MAX_COMPARE: u32 = PWM_PERIOD - max_u32(MIN_ON_COUNTS, 65);
 
 const HRTIM_TIMCR_CONT: u32 = 1 << 3;
 const HRTIM_TIMCR_TRSTU: u32 = 1 << 18;
@@ -51,12 +60,15 @@ const HRTIM_DLLCR_CALRTE_2048: u32 = 3 << 2;
 const HRTIM_ADC_TRIGGER_TIMER_F_PERIOD: u32 = 1 << 24;
 const HRTIM_DISABLE_ALL_OUTPUTS: u32 = 0x0FFF;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PwmConfig {
     pub frequency_hz: u32,
     pub period_counts: u32,
     pub zero_compare_counts: u32,
     pub deadtime_counts: u32,
+    pub min_compare_counts: u32,
+    pub max_compare_counts: u32,
+    pub nominal_vbus_v: f32,
 }
 
 impl PwmConfig {
@@ -65,7 +77,17 @@ impl PwmConfig {
         period_counts: PWM_PERIOD,
         zero_compare_counts: PWM_ZERO_COMPARE,
         deadtime_counts: DEADTIME_COUNTS,
+        min_compare_counts: PWM_MIN_COMPARE,
+        max_compare_counts: PWM_MAX_COMPARE,
+        nominal_vbus_v: NOMINAL_VBUS_V,
     };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhaseCompares {
+    pub phase_a: u32,
+    pub phase_b: u32,
+    pub phase_c: u32,
 }
 
 pub struct SafeZeroPwm {
@@ -93,6 +115,25 @@ impl SafeZeroPwm {
         self.write_phase_zero(TIMER_D);
         self.write_phase_zero(TIMER_E);
         self.write_phase_zero(TIMER_F);
+    }
+
+    #[inline(always)]
+    pub fn write_voltage_commands_disabled(&self, command: FocVoltages) -> PhaseCompares {
+        let compares = self.compares_from_voltages(command);
+        self.write_phase_compare(TIMER_D, compares.phase_a);
+        self.write_phase_compare(TIMER_F, compares.phase_b);
+        self.write_phase_compare(TIMER_E, compares.phase_c);
+        disable_outputs();
+        compares
+    }
+
+    #[inline(always)]
+    pub fn compares_from_voltages(&self, command: FocVoltages) -> PhaseCompares {
+        PhaseCompares {
+            phase_a: self.compare_from_voltage(command.v_a),
+            phase_b: self.compare_from_voltage(command.v_b),
+            phase_c: self.compare_from_voltage(command.v_c),
+        }
     }
 
     pub fn config(&self) -> PwmConfig {
@@ -136,10 +177,23 @@ impl SafeZeroPwm {
     }
 
     fn write_phase_zero(&self, timer: usize) {
-        write(
-            timer_register(timer, HRTIM_CMP1XR),
-            self.config.zero_compare_counts,
-        );
+        self.write_phase_compare(timer, self.config.zero_compare_counts);
+    }
+
+    #[inline(always)]
+    fn write_phase_compare(&self, timer: usize, compare: u32) {
+        write(timer_register(timer, HRTIM_CMP1XR), compare);
+    }
+
+    #[inline(always)]
+    fn compare_from_voltage(&self, voltage: f32) -> u32 {
+        let scaled = voltage * (self.config.period_counts as f32 / self.config.nominal_vbus_v)
+            + self.config.zero_compare_counts as f32;
+        clamp_compare(
+            scaled,
+            self.config.min_compare_counts,
+            self.config.max_compare_counts,
+        )
     }
 }
 
@@ -156,6 +210,25 @@ fn start_motor_timers() {
     modify(HRTIM_MASTER_MCR, |value| {
         value | HRTIM_MCR_TDCEN | HRTIM_MCR_TECEN | HRTIM_MCR_TFCEN
     });
+}
+
+const fn max_u32(a: u32, b: u32) -> u32 {
+    if a > b { a } else { b }
+}
+
+#[inline(always)]
+fn clamp_compare(value: f32, min: u32, max: u32) -> u32 {
+    let clamped_high = if value > max as f32 {
+        max as f32
+    } else {
+        value
+    };
+    let clamped = if clamped_high < min as f32 {
+        min as f32
+    } else {
+        clamped_high
+    };
+    clamped as u32
 }
 
 fn deadtime_register(config: PwmConfig) -> u32 {
@@ -181,4 +254,52 @@ fn write(address: usize, value: u32) {
     // SAFETY: The caller passes STM32G474 memory-mapped register addresses.
     // Volatile access is required so register writes are performed as requested.
     unsafe { write_volatile(address as *mut u32, value) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn motor_hall_pwm_config_matches_cpp_shape() {
+        let config = PwmConfig::MOTOR_HALL_SAFE_ZERO;
+
+        assert_eq!(config.period_counts, 54_400);
+        assert_eq!(config.zero_compare_counts, 27_200);
+        assert_eq!(config.deadtime_counts, 272);
+        assert_eq!(config.min_compare_counts, 2_720);
+        assert_eq!(config.max_compare_counts, 54_335);
+        assert_eq!(config.nominal_vbus_v, 12.0);
+    }
+
+    #[test]
+    fn compare_from_voltage_matches_cpp_formula() {
+        let config = PwmConfig::MOTOR_HALL_SAFE_ZERO;
+        let counts_per_volt = config.period_counts as f32 / config.nominal_vbus_v;
+
+        assert_eq!(
+            clamp_compare(
+                1.5 * counts_per_volt + config.zero_compare_counts as f32,
+                config.min_compare_counts,
+                config.max_compare_counts
+            ),
+            34_000,
+        );
+        assert_eq!(
+            clamp_compare(
+                -100.0 * counts_per_volt + config.zero_compare_counts as f32,
+                config.min_compare_counts,
+                config.max_compare_counts
+            ),
+            config.min_compare_counts,
+        );
+        assert_eq!(
+            clamp_compare(
+                100.0 * counts_per_volt + config.zero_compare_counts as f32,
+                config.min_compare_counts,
+                config.max_compare_counts
+            ),
+            config.max_compare_counts,
+        );
+    }
 }
