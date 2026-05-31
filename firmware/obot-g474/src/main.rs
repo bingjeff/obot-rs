@@ -3,11 +3,16 @@
 #![cfg_attr(target_os = "none", allow(dead_code))]
 
 #[cfg(target_os = "none")]
+mod startup;
+
+#[cfg(target_os = "none")]
 use core::panic::PanicInfo;
 use obot_core::{
     Controller, Limits,
     timing::{LoopScheduler, LoopTiming},
 };
+#[cfg(target_os = "none")]
+use obot_g474::cycle_counter::{CycleCounter, DwtCycleCounter};
 
 const LIMITS: Limits = Limits {
     max_torque_nm: 2.0,
@@ -33,14 +38,19 @@ fn main() {
 }
 
 #[cfg(target_os = "none")]
-fn main() -> ! {
+fn firmware_main() -> ! {
     let controller = controller();
     let mut scheduler = scheduler();
+    let cycle_counter = DwtCycleCounter::new();
+    cycle_counter.enable();
+
     let _ = controller.state();
-    let _ = scheduler.poll(0);
 
     loop {
-        core::hint::spin_loop();
+        let poll = scheduler.poll(cycle_counter.now());
+        if !poll.fast && !poll.main {
+            core::hint::spin_loop();
+        }
     }
 }
 
