@@ -6,6 +6,7 @@ use obot_core::{
 };
 
 pub const COMMAND_PACKET_LEN: usize = 14;
+pub const DRIVER_COMMAND_PACKET_LEN: usize = 2;
 pub const STATUS_PACKET_LEN: usize = 14;
 pub const DRIVER_REPORT_PACKET_LEN: usize = 14;
 pub const BENCHMARK_PACKET_LEN: usize = 81;
@@ -15,6 +16,7 @@ pub enum DecodeError {
     InvalidLength,
     InvalidMode,
     InvalidFault,
+    InvalidDriverCommand,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,6 +48,34 @@ impl CommandPacket {
                 velocity_rad_s: f32::from_le_bytes(bytes[6..10].try_into().unwrap()),
                 position_rad: f32::from_le_bytes(bytes[10..14].try_into().unwrap()),
             },
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DriverCommand {
+    Disable,
+    ConfigureEnable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DriverCommandPacket {
+    pub sequence: u8,
+    pub command: DriverCommand,
+}
+
+impl DriverCommandPacket {
+    pub fn encode(self) -> [u8; DRIVER_COMMAND_PACKET_LEN] {
+        [self.sequence, driver_command_to_u8(self.command)]
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let bytes: &[u8; DRIVER_COMMAND_PACKET_LEN] =
+            input.try_into().map_err(|_| DecodeError::InvalidLength)?;
+
+        Ok(Self {
+            sequence: bytes[0],
+            command: driver_command_from_u8(bytes[1])?,
         })
     }
 }
@@ -241,6 +271,21 @@ const fn fault_from_u8(value: u8) -> Result<Option<Fault>, DecodeError> {
     }
 }
 
+const fn driver_command_to_u8(command: DriverCommand) -> u8 {
+    match command {
+        DriverCommand::Disable => 0,
+        DriverCommand::ConfigureEnable => 1,
+    }
+}
+
+const fn driver_command_from_u8(value: u8) -> Result<DriverCommand, DecodeError> {
+    match value {
+        0 => Ok(DriverCommand::Disable),
+        1 => Ok(DriverCommand::ConfigureEnable),
+        _ => Err(DecodeError::InvalidDriverCommand),
+    }
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -261,6 +306,19 @@ mod tests {
         };
 
         assert_eq!(CommandPacket::decode(&packet.encode()).unwrap(), packet);
+    }
+
+    #[test]
+    fn driver_command_packet_round_trips() {
+        let packet = DriverCommandPacket {
+            sequence: 11,
+            command: DriverCommand::ConfigureEnable,
+        };
+
+        assert_eq!(
+            DriverCommandPacket::decode(&packet.encode()).unwrap(),
+            packet
+        );
     }
 
     #[test]
@@ -303,6 +361,16 @@ mod tests {
         assert_eq!(
             CommandPacket::decode(&bytes).unwrap_err(),
             DecodeError::InvalidMode
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_driver_command() {
+        let bytes = [0, 99];
+
+        assert_eq!(
+            DriverCommandPacket::decode(&bytes).unwrap_err(),
+            DecodeError::InvalidDriverCommand
         );
     }
 

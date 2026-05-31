@@ -972,3 +972,103 @@ Current comparison:
 
 The Rust path now includes the earlier motor-control subset, output safety gates, J-Link command/status, and DRV8323S register programming/readback reporting. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not applied to HRTIM, bridge outputs remain disabled, successful DRV8323S configuration requires an explicit driver-enable stage, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
 
+
+## 2026-05-31: Host-Triggered DRV8323S Configure Enable Command, J-Link Debug Readout
+
+Change under test:
+
+- Added a separate driver command packet and `write-driver-command-jlink` helper.
+- Firmware now waits for a host `configure-enable` command before asserting PC13 and running DRV8323S register programming/readback.
+- On failed verification, firmware disables PC13 again.
+- HRTIM outputs remain disabled and the fast loop still writes zero voltage.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo test --manifest-path tools/obot-bench-debug/Cargo.toml
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-driver-command-jlink --packet-address 0x2000007f --sequence-address 0x2000009f --sequence 1 --command configure-enable
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-driver-jlink --address 0x20000081
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink --address 0x20000020
+```
+
+Release artifact sizes:
+
+```text
+137752 target/thumbv7em-none-eabihf/release/obot-g474
+ 16864 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+`arm-none-eabi-size`:
+
+```text
+   text   data    bss    dec    hex filename
+  16832     32    132  16996   4264 target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+Exported packet addresses:
+
+```text
+OBOT_BENCHMARK_PACKET                 0x20000020
+OBOT_COMMAND_PACKET                   0x20000071
+OBOT_DRIVER_COMMAND_PACKET            0x2000007f
+OBOT_DRIVER_REPORT_PACKET             0x20000081
+OBOT_STATUS_PACKET                    0x2000008f
+OBOT_COMMAND_PACKET_SEQUENCE          0x2000009e
+OBOT_DRIVER_COMMAND_PACKET_SEQUENCE   0x2000009f
+```
+
+Initial driver report after flash:
+
+```text
+rust_debug, 0, false, 0x0000, 0x0000, 0x00000000, 0x00000000
+```
+
+Driver report after `configure-enable`:
+
+```text
+name, sequence, configured, verify_error_mask, transfer_error_mask, status_before, status_after
+rust_debug, 0, false, 0x001F, 0x0000, 0xFFFFFFFF, 0xFFFFFFFF
+```
+
+GPIOC IDR after failed configure:
+
+```text
+0x48000810 = 0x00004000
+```
+
+Interpretation:
+
+- The command path executed and generated a real report.
+- SPI transfers completed, but all five readbacks mismatched and DRV status read as all ones.
+- PC13 was low after failure and PC14 fault input was high, so failed configure did not leave the driver-enable pin asserted.
+
+Representative steady-state benchmark after configure command and benchmark reset:
+
+```text
+rust_debug, 892, 4578, 1551, 17008, 409.872, 3400.051, 1071.433, 16976.8
+```
+
+Motor command/status verification:
+
+```text
+name, sequence, fault, torque_nm, velocity_rad_s, position_rad
+rust_debug, 39, none, 1.25, 0, 0
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `409.872 cycles = 2.411 us`.
+- Main-loop mean execution: `1071.433 cycles = 6.302 us`.
+- Combined 100 us max load: `(5 * 892 + 1551) / 17000 = 35.36%`.
+- Combined 100 us mean load: `(5 * 409.872 + 1071.433) / 17000 = 18.89%`.
+
+Current comparison:
+
+The Rust path now includes the earlier motor-control subset, output safety gates, J-Link motor command/status, host-triggered driver command handling, and DRV8323S register programming/readback reporting. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not applied to HRTIM, bridge outputs remain disabled, successful DRV8323S configuration is not yet achieved on this attached hardware state, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
+

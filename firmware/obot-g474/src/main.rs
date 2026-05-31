@@ -42,7 +42,7 @@ use obot_g474::hall::HallInputs;
 #[cfg(target_os = "none")]
 use obot_g474::pwm::SafeZeroPwm;
 #[cfg(target_os = "none")]
-use obot_protocol::{BenchmarkPacket, DriverReportPacket, StatusPacket};
+use obot_protocol::{BenchmarkPacket, DriverCommand, DriverReportPacket, StatusPacket};
 
 #[cfg(target_os = "none")]
 const FAST_LOOP_DT_S: f32 = 1.0 / 50_000.0;
@@ -78,6 +78,8 @@ fn firmware_main() -> ! {
     let mut benchmark_sequence = 0;
     let mut status_sequence = 0;
     let mut command_sequence = 0;
+    let mut driver_command_sequence = 0;
+    let mut driver_report_sequence = 0;
     if clock::configure_170mhz_hsi().is_err() {
         loop {
             core::hint::spin_loop();
@@ -87,7 +89,7 @@ fn firmware_main() -> ! {
     let cycle_counter = DwtCycleCounter::new();
     cycle_counter.enable();
     let driver = MotorDriverPins::init_motor_hall_disabled();
-    probe_driver_spi_status();
+    let driver_spi = Drv8323s::init_motor_hall();
     let pwm = SafeZeroPwm::init_motor_hall();
     let mut hall = HallInputs::init_motor_hall();
     let current_adc = match CurrentAdc::init_motor_hall() {
@@ -133,10 +135,18 @@ fn firmware_main() -> ! {
         }
 
         if poll.main {
+            let mut driver_action_completed = false;
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
                 (command_allows_output, controller_faulted) =
                     service_host_debug(&mut command_sequence, status_sequence);
                 status_sequence = status_sequence.wrapping_add(1);
+                driver_action_completed = service_driver_debug(
+                    &driver,
+                    &driver_spi,
+                    &cycle_counter,
+                    &mut driver_command_sequence,
+                    &mut driver_report_sequence,
+                );
                 bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
                 output_allowed = update_output_safety(
                     &driver,
@@ -146,10 +156,16 @@ fn firmware_main() -> ! {
                 );
                 core::hint::black_box((command_allows_output, controller_faulted));
             });
-            benchmark_sequence = publish_benchmark_report(
-                benchmark_sequence,
-                BenchmarkReport::from_loops(fast_benchmark, main_benchmark),
-            );
+            if driver_action_completed {
+                fast_benchmark = LoopBenchmark::new();
+                main_benchmark = LoopBenchmark::new();
+                benchmark_sequence = 0;
+            } else {
+                benchmark_sequence = publish_benchmark_report(
+                    benchmark_sequence,
+                    BenchmarkReport::from_loops(fast_benchmark, main_benchmark),
+                );
+            }
         }
 
         if !poll.fast && !poll.main {
@@ -190,15 +206,47 @@ fn service_host_debug(command_sequence: &mut u8, status_sequence: u8) -> (bool, 
 #[cfg(target_os = "none")]
 #[cold]
 #[inline(never)]
-fn probe_driver_spi_status() {
-    let driver_spi = Drv8323s::init_motor_hall();
-    let report = driver_spi.configure_motor_hall_registers();
-    publish_driver_report(0, report);
-    core::hint::black_box((
-        report.configured(),
-        report.verify_error_mask,
-        report.transfer_error_mask,
-    ));
+fn service_driver_debug(
+    driver: &MotorDriverPins,
+    driver_spi: &Drv8323s,
+    cycle_counter: &impl CycleCounter,
+    command_sequence: &mut u8,
+    report_sequence: &mut u8,
+) -> bool {
+    let Some(packet) = debug_report::poll_driver_command(command_sequence) else {
+        return false;
+    };
+
+    let report = match packet.command {
+        DriverCommand::Disable => {
+            driver.disable();
+            Drv8323sConfigReport::default()
+        }
+        DriverCommand::ConfigureEnable => {
+            driver.enable();
+            wait_cycles(cycle_counter, 1_700_000);
+            let report = driver_spi.configure_motor_hall_registers();
+            if !report.configured() {
+                driver.disable();
+            }
+            report
+        }
+    };
+
+    publish_driver_report(*report_sequence, report);
+    *report_sequence = (*report_sequence).wrapping_add(1);
+    core::hint::black_box((packet.command, report.configured()));
+    true
+}
+
+#[cfg(target_os = "none")]
+#[cold]
+#[inline(never)]
+fn wait_cycles(cycle_counter: &impl CycleCounter, cycles: u32) {
+    let start = cycle_counter.now();
+    while cycle_counter.now().wrapping_sub(start) < cycles {
+        core::hint::spin_loop();
+    }
 }
 
 #[cfg(target_os = "none")]

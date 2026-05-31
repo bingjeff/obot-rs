@@ -6,8 +6,9 @@ use std::{
 
 use obot_core::{ControlMode, MotorCommand};
 use obot_protocol::{
-    BENCHMARK_PACKET_LEN, BenchmarkPacket, CommandPacket, DRIVER_REPORT_PACKET_LEN,
-    DriverReportPacket, STATUS_PACKET_LEN, StatusPacket,
+    BENCHMARK_PACKET_LEN, BenchmarkPacket, CommandPacket, DRIVER_REPORT_PACKET_LEN, DriverCommand,
+    DriverCommandPacket, DriverReportPacket,
+    STATUS_PACKET_LEN, StatusPacket,
 };
 
 const DEFAULT_NAME: &str = "rust_debug";
@@ -43,6 +44,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
+        "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
         "jlink-script" => jlink_script_command(rest),
         "--help" | "-h" | "help" => Ok(usage()),
         other => Err(format!("unknown command `{other}`")),
@@ -171,6 +173,44 @@ fn write_command_jlink_command(args: &[String]) -> Result<String, String> {
     ))
 }
 
+fn write_driver_command_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = DriverCommandWriteOptions::parse(args)?;
+    let packet = DriverCommandPacket {
+        sequence: options.sequence,
+        command: options.command,
+    };
+    let encoded = packet.encode();
+    let script = jlink_write_raw_packet_script(
+        &options.jlink,
+        options.packet_address,
+        options.sequence_address,
+        options.sequence,
+        &encoded,
+    );
+    let script_path = write_temp_script(&script)?;
+    let output = Command::new("JLinkExe")
+        .arg("-CommanderScript")
+        .arg(&script_path)
+        .output()
+        .map_err(|error| format!("failed to run JLinkExe: {error}"));
+    let _ = fs::remove_file(&script_path);
+    let output = output?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "JLinkExe failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status, stdout, stderr
+        ));
+    }
+
+    Ok(format!(
+        "wrote driver command sequence {} command {:?}\n",
+        options.sequence, options.command
+    ))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct JlinkOptions {
     address: u32,
@@ -227,6 +267,90 @@ struct CommandWriteOptions {
     torque_nm: f32,
     velocity_rad_s: f32,
     position_rad: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DriverCommandWriteOptions {
+    jlink: JlinkOptions,
+    packet_address: u32,
+    sequence_address: u32,
+    sequence: u8,
+    command: DriverCommand,
+}
+
+impl DriverCommandWriteOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            jlink: JlinkOptions {
+                address: DEFAULT_ADDRESS,
+                speed_khz: DEFAULT_SPEED_KHZ,
+                device: DEFAULT_DEVICE,
+            },
+            packet_address: 0,
+            sequence_address: 0,
+            sequence: 1,
+            command: DriverCommand::Disable,
+        };
+        let mut packet_address_set = false;
+        let mut sequence_address_set = false;
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--packet-address" => {
+                    index += 1;
+                    options.packet_address = parse_u32_arg(args.get(index), "--packet-address")?;
+                    packet_address_set = true;
+                }
+                "--sequence-address" => {
+                    index += 1;
+                    options.sequence_address =
+                        parse_u32_arg(args.get(index), "--sequence-address")?;
+                    sequence_address_set = true;
+                }
+                "--sequence" => {
+                    index += 1;
+                    let sequence = parse_u32_arg(args.get(index), "--sequence")?;
+                    options.sequence = sequence
+                        .try_into()
+                        .map_err(|_| "--sequence must fit in u8".to_string())?;
+                }
+                "--command" => {
+                    index += 1;
+                    let command = args
+                        .get(index)
+                        .ok_or_else(|| "--command requires a value".to_string())?;
+                    options.command = parse_driver_command(command)?;
+                }
+                "--speed" => {
+                    index += 1;
+                    options.jlink.speed_khz = parse_u32_arg(args.get(index), "--speed")?;
+                }
+                "--device" => {
+                    index += 1;
+                    let device = args
+                        .get(index)
+                        .ok_or_else(|| "--device requires a value".to_string())?;
+                    if device != DEFAULT_DEVICE {
+                        return Err(format!(
+                            "unsupported device `{device}`; this helper currently supports `{DEFAULT_DEVICE}`"
+                        ));
+                    }
+                }
+                other => return Err(format!("unknown option `{other}`")),
+            }
+            index += 1;
+        }
+
+        if !packet_address_set {
+            return Err("write-driver-command-jlink requires --packet-address".to_string());
+        }
+        if !sequence_address_set {
+            return Err("write-driver-command-jlink requires --sequence-address".to_string());
+        }
+
+        Ok(options)
+    }
 }
 
 impl CommandWriteOptions {
@@ -343,6 +467,16 @@ fn parse_control_mode(value: &str) -> Result<ControlMode, String> {
     }
 }
 
+fn parse_driver_command(value: &str) -> Result<DriverCommand, String> {
+    match value {
+        "disable" => Ok(DriverCommand::Disable),
+        "configure-enable" => Ok(DriverCommand::ConfigureEnable),
+        _ => Err(format!(
+            "invalid --command `{value}`; expected disable or configure-enable"
+        )),
+    }
+}
+
 fn parse_u32(value: &str) -> Option<u32> {
     value
         .strip_prefix("0x")
@@ -365,19 +499,35 @@ fn jlink_read_script(options: &JlinkOptions, len: usize) -> String {
 }
 
 fn jlink_write_command_script(options: &CommandWriteOptions, encoded_packet: &[u8]) -> String {
+    jlink_write_raw_packet_script(
+        &options.jlink,
+        options.packet_address,
+        options.sequence_address,
+        options.sequence,
+        encoded_packet,
+    )
+}
+
+fn jlink_write_raw_packet_script(
+    jlink: &JlinkOptions,
+    packet_address: u32,
+    sequence_address: u32,
+    sequence: u8,
+    encoded_packet: &[u8],
+) -> String {
     let mut script = format!(
         "device {}\nif SWD\nspeed {}\nconnect\n",
-        options.jlink.device, options.jlink.speed_khz
+        jlink.device, jlink.speed_khz
     );
     for (offset, byte) in encoded_packet.iter().copied().enumerate() {
         script.push_str(&format!(
             "w1 0x{:08X}, 0x{byte:02X}\n",
-            options.packet_address + offset as u32
+            packet_address + offset as u32
         ));
     }
     script.push_str(&format!(
         "w1 0x{:08X}, 0x{:02X}\nexit\n",
-        options.sequence_address, options.sequence
+        sequence_address, sequence
     ));
     script
 }
@@ -573,7 +723,7 @@ fn parse_jlink_mem8_output(output: &str, expected_len: usize) -> Result<Vec<u8>,
 
 fn usage() -> String {
     format!(
-        "usage:\n  obot-bench-debug decode-hex <{} benchmark bytes as hex>\n  obot-bench-debug decode-file <path-to-raw-{}-byte-benchmark-packet>\n  obot-bench-debug decode-status-hex <{} status bytes as hex>\n  obot-bench-debug decode-driver-hex <{} driver report bytes as hex>\n  obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]\n  obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]\n  obot-bench-debug read-status-jlink --address <status-packet-address> [--speed 4000]\n  obot-bench-debug read-driver-jlink --address <driver-report-address> [--speed 4000]\n  obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position] [--torque Nm] [--velocity rad_s] [--position rad]\n",
+        "usage:\n  obot-bench-debug decode-hex <{} benchmark bytes as hex>\n  obot-bench-debug decode-file <path-to-raw-{}-byte-benchmark-packet>\n  obot-bench-debug decode-status-hex <{} status bytes as hex>\n  obot-bench-debug decode-driver-hex <{} driver report bytes as hex>\n  obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]\n  obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]\n  obot-bench-debug read-status-jlink --address <status-packet-address> [--speed 4000]\n  obot-bench-debug read-driver-jlink --address <driver-report-address> [--speed 4000]\n  obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position] [--torque Nm] [--velocity rad_s] [--position rad]\n  obot-bench-debug write-driver-command-jlink --packet-address <driver-command-packet-address> --sequence-address <driver-command-sequence-address> [--sequence N] [--command disable|configure-enable]\n",
         BENCHMARK_PACKET_LEN, BENCHMARK_PACKET_LEN, STATUS_PACKET_LEN, DRIVER_REPORT_PACKET_LEN
     )
 }
@@ -718,6 +868,26 @@ mod tests {
             output,
             "name, sequence, configured, verify_error_mask, transfer_error_mask, status_before, status_after\nrust, 4, false, 0x0012, 0x0040, 0xAABBCCDD, 0x11223344\n"
         );
+    }
+
+    #[test]
+    fn parses_driver_command_write_options() {
+        let options = DriverCommandWriteOptions::parse(&[
+            "--packet-address".to_string(),
+            "0x20000090".to_string(),
+            "--sequence-address".to_string(),
+            "0x20000092".to_string(),
+            "--sequence".to_string(),
+            "8".to_string(),
+            "--command".to_string(),
+            "configure-enable".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.packet_address, 0x2000_0090);
+        assert_eq!(options.sequence_address, 0x2000_0092);
+        assert_eq!(options.sequence, 8);
+        assert_eq!(options.command, DriverCommand::ConfigureEnable);
     }
 
     #[test]

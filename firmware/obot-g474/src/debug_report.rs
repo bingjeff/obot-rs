@@ -2,7 +2,8 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 use obot_protocol::{
     BENCHMARK_PACKET_LEN, BenchmarkPacket, COMMAND_PACKET_LEN, CommandPacket,
-    DRIVER_REPORT_PACKET_LEN, DriverReportPacket, STATUS_PACKET_LEN, StatusPacket,
+    DRIVER_COMMAND_PACKET_LEN, DRIVER_REPORT_PACKET_LEN, DriverCommandPacket, DriverReportPacket,
+    STATUS_PACKET_LEN, StatusPacket,
 };
 
 #[unsafe(no_mangle)]
@@ -20,6 +21,15 @@ pub static mut OBOT_COMMAND_PACKET: [u8; COMMAND_PACKET_LEN] = [0; COMMAND_PACKE
 #[unsafe(no_mangle)]
 #[used]
 pub static mut OBOT_COMMAND_PACKET_SEQUENCE: u8 = 0;
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_DRIVER_COMMAND_PACKET: [u8; DRIVER_COMMAND_PACKET_LEN] =
+    [0; DRIVER_COMMAND_PACKET_LEN];
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_DRIVER_COMMAND_PACKET_SEQUENCE: u8 = 0;
 
 #[unsafe(no_mangle)]
 #[used]
@@ -71,6 +81,30 @@ pub fn poll_command(last_sequence: &mut u8) -> Option<CommandPacket> {
     }
 
     match CommandPacket::decode(&bytes) {
+        Ok(packet) if packet.sequence == sequence => {
+            *last_sequence = sequence;
+            Some(packet)
+        }
+        Ok(_) | Err(_) => {
+            *last_sequence = sequence;
+            None
+        }
+    }
+}
+
+pub fn poll_driver_command(last_sequence: &mut u8) -> Option<DriverCommandPacket> {
+    let sequence = unsafe { read_volatile(addr_of!(OBOT_DRIVER_COMMAND_PACKET_SEQUENCE)) };
+    if sequence == *last_sequence {
+        return None;
+    }
+
+    let src = addr_of!(OBOT_DRIVER_COMMAND_PACKET).cast::<u8>();
+    let mut bytes = [0; DRIVER_COMMAND_PACKET_LEN];
+    for (offset, byte) in bytes.iter_mut().enumerate() {
+        *byte = unsafe { read_volatile(src.add(offset)) };
+    }
+
+    match DriverCommandPacket::decode(&bytes) {
         Ok(packet) if packet.sequence == sequence => {
             *last_sequence = sequence;
             Some(packet)
@@ -139,6 +173,14 @@ pub fn command_packet_ptr() -> *const u8 {
 
 pub const fn command_packet_len() -> usize {
     COMMAND_PACKET_LEN
+}
+
+pub fn driver_command_packet_ptr() -> *const u8 {
+    addr_of!(OBOT_DRIVER_COMMAND_PACKET).cast::<u8>()
+}
+
+pub const fn driver_command_packet_len() -> usize {
+    DRIVER_COMMAND_PACKET_LEN
 }
 
 pub fn driver_report_packet_ptr() -> *const u8 {
