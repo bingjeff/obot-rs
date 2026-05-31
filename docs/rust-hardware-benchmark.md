@@ -312,3 +312,47 @@ Interpretation at 170 MHz:
 Comparison caveat:
 
 This build runs the Rust FOC math with a fixed zero electrical angle, zero current command, measured current conversion, current filtering, PI current control, and voltage command generation. It still discards FOC voltage commands, writes zero PWM, and keeps bridge outputs disabled. It does not yet include hall-derived electrical angle, live command input, PWM voltage application, full safety/fault handling, or host API parity.
+
+
+## 2026-05-31: Copy-Reduced Zero-Command FOC Surface, J-Link Debug Readout
+
+Firmware commit: `b82df50 Reduce FOC hot-path copies`
+
+Change under test:
+
+- `FocController::step_with_sincos` now takes `&FocCommand` and returns `&FocStatus`, matching the C++ by-reference command/status shape more closely and avoiding one by-value status copy in the measured firmware loop.
+
+Release artifact sizes:
+
+```text
+133624 target/thumbv7em-none-eabihf/release/obot-g474
+  9728 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+Flash result:
+
+```text
+J-Link: Flash download: Bank 0 @ 0x08000000: 1 range affected (10240 bytes)
+J-Link: Flash download: Program & Verify speed: 77 KB/s
+O.K.
+```
+
+Representative readout after flashing:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 969, 3772, 121, 17006, 955.19, 3399.231, 120.749, 16974.104
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `955.19 cycles = 5.619 us`.
+- Main-loop mean execution: `120.749 cycles = 0.710 us`.
+- Combined 100 us max load: `(5 * 969 + 121) / 17000 = 29.21%`.
+- Combined 100 us mean load: `(5 * 955.19 + 120.749) / 17000 = 28.80%`.
+- Improvement versus the prior FOC benchmark: `982 - 955.19 = 26.81 cycles = 0.158 us` mean fast-loop savings.
+- Incremental mean fast-loop cost over current conversion: `955.19 - 173.259 = 781.931 cycles = 4.600 us`.
+
+Comparison caveat:
+
+This is the current best Rust FOC subset result, but it is still not feature-equivalent to C++ `motor_hall`. The hot path still uses a fixed zero electrical angle and does not apply commanded voltage to PWM outputs.
