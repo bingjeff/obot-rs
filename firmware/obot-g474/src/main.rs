@@ -20,6 +20,8 @@ use obot_core::{
 #[cfg(target_os = "none")]
 use obot_g474::cycle_counter::{CycleCounter, DwtCycleCounter};
 #[cfg(target_os = "none")]
+use obot_g474::pwm::SafeZeroPwm;
+#[cfg(target_os = "none")]
 use obot_protocol::BenchmarkPacket;
 
 const LIMITS: Limits = Limits {
@@ -60,13 +62,16 @@ fn firmware_main() -> ! {
 
     let cycle_counter = DwtCycleCounter::new();
     cycle_counter.enable();
+    let pwm = SafeZeroPwm::init_motor_hall();
 
     let _ = controller.state();
+    core::hint::black_box(pwm.config());
 
     loop {
         let poll = scheduler.poll(cycle_counter.now());
         if poll.fast {
             run_measured_loop(&mut fast_benchmark, &cycle_counter, || {
+                pwm.write_zero_voltage();
                 core::hint::black_box(controller.state());
             });
         }
