@@ -6,6 +6,8 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Command, ExitCode},
+    thread,
+    time::{Duration, Instant},
 };
 
 use obot_core::{
@@ -45,6 +47,9 @@ const TEXT_API_REQUEST_PACKET_SYMBOL: &str = "OBOT_TEXT_API_REQUEST_PACKET";
 const TEXT_API_REQUEST_SEQUENCE_SYMBOL: &str = "OBOT_TEXT_API_REQUEST_PACKET_SEQUENCE";
 const TEXT_API_RESPONSE_PACKET_SYMBOL: &str = "OBOT_TEXT_API_RESPONSE_PACKET";
 const DEFAULT_USB_TIMEOUT_MS: u32 = 1_000;
+const DEFAULT_USB_DRIVER_CHECK_TIMEOUT_MS: u32 = 5_000;
+const DEFAULT_USB_DRIVER_CHECK_POLL_MS: u32 = 50;
+const DEFAULT_USB_DRIVER_CHECK_RESET_MS: u32 = 100;
 const USB_REALTIME_INTERFACE: u32 = 0;
 const USB_REALTIME_OUT_ENDPOINT: u32 = 0x02;
 const USB_REALTIME_IN_ENDPOINT: u32 = 0x82;
@@ -114,6 +119,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "write-command-usb" => write_command_usb_command(rest),
         "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
         "write-driver-command-usb" => write_driver_command_usb_command(rest),
+        "check-driver-usb" => check_driver_usb_command(rest),
         "jlink-script" => jlink_script_command(rest),
         "--help" | "-h" | "help" => Ok(usage()),
         other => Err(format!("unknown command `{other}`")),
@@ -458,6 +464,12 @@ fn write_driver_command_usb_command(args: &[String]) -> Result<String, String> {
     Ok(format_status_csv(DEFAULT_NAME, status))
 }
 
+fn check_driver_usb_command(args: &[String]) -> Result<String, String> {
+    let options = DriverCheckUsbOptions::parse(args)?;
+    let result = check_driver_usb(&options)?;
+    Ok(format_usb_driver_check_csv(DEFAULT_NAME, result))
+}
+
 fn write_driver_command_jlink_command(args: &[String]) -> Result<String, String> {
     let options = DriverCommandWriteOptions::parse(args)?.resolve()?;
     let packet = DriverCommandPacket {
@@ -766,6 +778,35 @@ struct DriverCommandUsbOptions {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct DriverCheckUsbOptions {
+    command: DriverCommandUsbOptions,
+    poll_timeout_ms: u32,
+    poll_interval_ms: u32,
+    reset_settle_ms: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UsbDriverCheckFields {
+    driver_configured: bool,
+    verify_error_mask: u32,
+    transfer_error_mask: u32,
+    status_before: u32,
+    status_after: u32,
+    output_allowed: bool,
+    bus_blocked: bool,
+    driver_not_enabled: bool,
+    bus_voltage_raw: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UsbDriverCheckResult {
+    command: DriverCommand,
+    immediate_status: StatusPacket,
+    fields: UsbDriverCheckFields,
+    report_observed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct TextApiUsbOptions {
     device_path: Option<PathBuf>,
     request: String,
@@ -1030,6 +1071,73 @@ impl DriverCommandUsbOptions {
     }
 }
 
+impl DriverCheckUsbOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            command: DriverCommandUsbOptions {
+                device_path: None,
+                sequence: 1,
+                command: DriverCommand::ConfigureEnable,
+                timeout_ms: DEFAULT_USB_TIMEOUT_MS,
+            },
+            poll_timeout_ms: DEFAULT_USB_DRIVER_CHECK_TIMEOUT_MS,
+            poll_interval_ms: DEFAULT_USB_DRIVER_CHECK_POLL_MS,
+            reset_settle_ms: DEFAULT_USB_DRIVER_CHECK_RESET_MS,
+        };
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--dev" | "--device-path" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--dev requires a value".to_string())?;
+                    options.command.device_path = Some(PathBuf::from(path));
+                }
+                "--sequence" => {
+                    index += 1;
+                    let sequence = parse_u32_arg(args.get(index), "--sequence")?;
+                    options.command.sequence = sequence
+                        .try_into()
+                        .map_err(|_| "--sequence must fit in u8".to_string())?;
+                }
+                "--command" => {
+                    index += 1;
+                    let command = args
+                        .get(index)
+                        .ok_or_else(|| "--command requires a value".to_string())?;
+                    options.command.command = parse_driver_command(command)?;
+                }
+                "--timeout-ms" => {
+                    index += 1;
+                    options.command.timeout_ms = parse_u32_arg(args.get(index), "--timeout-ms")?;
+                }
+                "--poll-timeout-ms" => {
+                    index += 1;
+                    options.poll_timeout_ms = parse_u32_arg(args.get(index), "--poll-timeout-ms")?;
+                }
+                "--poll-interval-ms" => {
+                    index += 1;
+                    options.poll_interval_ms = parse_u32_arg(args.get(index), "--poll-interval-ms")?;
+                }
+                "--reset-settle-ms" => {
+                    index += 1;
+                    options.reset_settle_ms = parse_u32_arg(args.get(index), "--reset-settle-ms")?;
+                }
+                other => return Err(format!("unknown option `{other}`")),
+            }
+            index += 1;
+        }
+
+        if options.poll_interval_ms == 0 {
+            return Err("--poll-interval-ms must be nonzero".to_string());
+        }
+
+        Ok(options)
+    }
+}
+
 impl RealtimeUsbOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
@@ -1247,6 +1355,21 @@ fn text_api_usb_u32_on_file(
         .map_err(|_| format!("text API `{request}` returned non-u32 response `{response}`"))
 }
 
+fn text_api_usb_bool_on_file(
+    file: &fs::File,
+    request: &str,
+    timeout_ms: u32,
+) -> Result<bool, String> {
+    let response = text_api_usb_request_on_file(file, request, timeout_ms)?;
+    match response.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        value => Err(format!(
+            "text API `{request}` returned non-bool response `{value}`"
+        )),
+    }
+}
+
 fn text_api_usb_request_on_file(
     file: &fs::File,
     request: &str,
@@ -1318,6 +1441,80 @@ impl UsbRunStatsAccumulator {
 
 fn mean_milli(sum: u64, samples: u64) -> u64 {
     (sum * 1_000 + samples / 2) / samples
+}
+
+fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckResult, String> {
+    if options.command.command == DriverCommand::ConfigureEnable {
+        let mut reset = options.command.clone();
+        reset.sequence = reset.sequence.wrapping_sub(1);
+        reset.command = DriverCommand::Disable;
+        let reset_packet = DriverCommandPacket {
+            sequence: reset.sequence,
+            command: reset.command,
+        };
+        transact_driver_command_usb(&reset, reset_packet)?;
+        thread::sleep(Duration::from_millis(options.reset_settle_ms as u64));
+    }
+
+    let packet = DriverCommandPacket {
+        sequence: options.command.sequence,
+        command: options.command.command,
+    };
+    let immediate_status = transact_driver_command_usb(&options.command, packet)?;
+    let device_path = options.command.resolved_device_path()?;
+    let fields = poll_usb_driver_check_fields(&device_path, options)?;
+    let report_observed = usb_driver_report_observed(fields);
+
+    Ok(UsbDriverCheckResult {
+        command: options.command.command,
+        immediate_status,
+        fields,
+        report_observed,
+    })
+}
+
+fn poll_usb_driver_check_fields(
+    device_path: &Path,
+    options: &DriverCheckUsbOptions,
+) -> Result<UsbDriverCheckFields, String> {
+    let deadline = Instant::now() + Duration::from_millis(options.poll_timeout_ms as u64);
+    loop {
+        let fields = read_usb_driver_check_fields(device_path, options.command.timeout_ms)?;
+        if options.command.command != DriverCommand::ConfigureEnable
+            || usb_driver_report_observed(fields)
+            || Instant::now() >= deadline
+        {
+            return Ok(fields);
+        }
+        thread::sleep(Duration::from_millis(options.poll_interval_ms as u64));
+    }
+}
+
+fn read_usb_driver_check_fields(
+    device_path: &Path,
+    timeout_ms: u32,
+) -> Result<UsbDriverCheckFields, String> {
+    let file = open_usb_device(device_path)?;
+    let _claim = claim_usb_interface(&file, USB_REALTIME_INTERFACE)?;
+    Ok(UsbDriverCheckFields {
+        driver_configured: text_api_usb_bool_on_file(&file, "driver_configured", timeout_ms)?,
+        verify_error_mask: text_api_usb_u32_on_file(&file, "verify_error_mask", timeout_ms)?,
+        transfer_error_mask: text_api_usb_u32_on_file(&file, "transfer_error_mask", timeout_ms)?,
+        status_before: text_api_usb_u32_on_file(&file, "status_before", timeout_ms)?,
+        status_after: text_api_usb_u32_on_file(&file, "status_after", timeout_ms)?,
+        output_allowed: text_api_usb_bool_on_file(&file, "output_allowed", timeout_ms)?,
+        bus_blocked: text_api_usb_bool_on_file(&file, "bus_blocked", timeout_ms)?,
+        driver_not_enabled: text_api_usb_bool_on_file(&file, "driver_not_enabled", timeout_ms)?,
+        bus_voltage_raw: text_api_usb_u32_on_file(&file, "bus_voltage_raw", timeout_ms)?,
+    })
+}
+
+fn usb_driver_report_observed(fields: UsbDriverCheckFields) -> bool {
+    fields.driver_configured
+        || fields.verify_error_mask != 0
+        || fields.transfer_error_mask != 0
+        || fields.status_before != 0
+        || fields.status_after != 0
 }
 
 fn transact_realtime_usb(
@@ -2357,6 +2554,34 @@ fn format_status_csv(name: &str, packet: StatusPacket) -> String {
     )
 }
 
+fn format_usb_driver_check_csv(name: &str, result: UsbDriverCheckResult) -> String {
+    let fields = result.fields;
+    format!(
+        "name, command, status_sequence, fault, report_observed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw\n{}, {}, {}, {}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}, {}, {}, {}, {}\n",
+        name,
+        format_driver_command(result.command),
+        result.immediate_status.sequence,
+        format_fault(result.immediate_status.state.fault),
+        result.report_observed,
+        fields.driver_configured,
+        fields.verify_error_mask,
+        fields.transfer_error_mask,
+        fields.status_before,
+        fields.status_after,
+        fields.output_allowed,
+        fields.bus_blocked,
+        fields.driver_not_enabled,
+        fields.bus_voltage_raw,
+    )
+}
+
+fn format_driver_command(command: DriverCommand) -> &'static str {
+    match command {
+        DriverCommand::Disable => "disable",
+        DriverCommand::ConfigureEnable => "configure_enable",
+    }
+}
+
 fn format_driver_csv(name: &str, packet: DriverReportPacket) -> String {
     format!(
         "name, sequence, configured, verify_error_mask, transfer_error_mask, status_before, status_after\n{}, {}, {}, 0x{:04X}, 0x{:04X}, 0x{:08X}, 0x{:08X}\n",
@@ -2673,6 +2898,7 @@ fn usage() -> String {
   obot-bench-debug write-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad] [--timeout-ms N]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
   obot-bench-debug write-driver-command-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command disable|configure-enable] [--timeout-ms N]
+  obot-bench-debug check-driver-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--command configure-enable|disable] [--timeout-ms N] [--poll-timeout-ms N]
 ",
         BENCHMARK_PACKET_LEN,
         BENCHMARK_PACKET_LEN,
@@ -3240,6 +3466,106 @@ mod tests {
 
         assert!(output.contains("combined_max, 9995, 9995, 58.79, 58.79, fail"));
         assert!(output.contains("combined_mean, 7100.315, 7100.315, 41.77, 41.77, fail"));
+    }
+
+    #[test]
+    fn parses_driver_check_usb_options() {
+        let options = DriverCheckUsbOptions::parse(&[
+            "--dev".to_string(),
+            "/dev/bus/usb/001/043".to_string(),
+            "--sequence".to_string(),
+            "88".to_string(),
+            "--command".to_string(),
+            "configure-enable".to_string(),
+            "--timeout-ms".to_string(),
+            "250".to_string(),
+            "--poll-timeout-ms".to_string(),
+            "2000".to_string(),
+            "--poll-interval-ms".to_string(),
+            "25".to_string(),
+            "--reset-settle-ms".to_string(),
+            "75".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            options.command.device_path,
+            Some(PathBuf::from("/dev/bus/usb/001/043"))
+        );
+        assert_eq!(options.command.sequence, 88);
+        assert_eq!(options.command.command, DriverCommand::ConfigureEnable);
+        assert_eq!(options.command.timeout_ms, 250);
+        assert_eq!(options.poll_timeout_ms, 2000);
+        assert_eq!(options.poll_interval_ms, 25);
+        assert_eq!(options.reset_settle_ms, 75);
+    }
+
+    #[test]
+    fn rejects_zero_driver_check_poll_interval() {
+        let error = DriverCheckUsbOptions::parse(&[
+            "--poll-interval-ms".to_string(),
+            "0".to_string(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(error, "--poll-interval-ms must be nonzero");
+    }
+
+    #[test]
+    fn formats_usb_driver_check_csv() {
+        let output = format_usb_driver_check_csv(
+            "rust",
+            UsbDriverCheckResult {
+                command: DriverCommand::ConfigureEnable,
+                immediate_status: StatusPacket {
+                    sequence: 94,
+                    state: obot_core::MotorState::default(),
+                },
+                fields: UsbDriverCheckFields {
+                    driver_configured: false,
+                    verify_error_mask: 0,
+                    transfer_error_mask: 0x007F,
+                    status_before: 0xFFFF_FFFF,
+                    status_after: 0xFFFF_FFFF,
+                    output_allowed: false,
+                    bus_blocked: true,
+                    driver_not_enabled: true,
+                    bus_voltage_raw: 2,
+                },
+                report_observed: true,
+            },
+        );
+
+        assert_eq!(
+            output,
+            "name, command, status_sequence, fault, report_observed, driver_configured, verify_error_mask, transfer_error_mask, status_before, status_after, output_allowed, bus_blocked, driver_not_enabled, bus_voltage_raw\nrust, configure_enable, 94, none, true, false, 0x0000, 0x007F, 0xFFFFFFFF, 0xFFFFFFFF, false, true, true, 2\n"
+        );
+    }
+
+    #[test]
+    fn detects_observed_usb_driver_report() {
+        assert!(!usb_driver_report_observed(UsbDriverCheckFields {
+            driver_configured: false,
+            verify_error_mask: 0,
+            transfer_error_mask: 0,
+            status_before: 0,
+            status_after: 0,
+            output_allowed: false,
+            bus_blocked: true,
+            driver_not_enabled: true,
+            bus_voltage_raw: 2,
+        }));
+        assert!(usb_driver_report_observed(UsbDriverCheckFields {
+            driver_configured: false,
+            verify_error_mask: 0,
+            transfer_error_mask: 0x7F,
+            status_before: 0,
+            status_after: 0,
+            output_allowed: false,
+            bus_blocked: true,
+            driver_not_enabled: true,
+            bus_voltage_raw: 2,
+        }));
     }
 
     #[test]
