@@ -42,6 +42,9 @@ const MIN_OFF_COUNTS: u32 = 2 * MIN_OFF_NS * HRTIM_COUNTS_PER_US / 1_000;
 const MIN_ON_COUNTS: u32 = 2 * MIN_ON_NS * HRTIM_COUNTS_PER_US / 1_000;
 const PWM_MIN_COMPARE: u32 = MIN_OFF_COUNTS;
 const PWM_MAX_COMPARE: u32 = PWM_PERIOD - max_u32(MIN_ON_COUNTS, 65);
+const PWM_ZERO_COMPARE_F32: f32 = PWM_ZERO_COMPARE as f32;
+const PWM_MIN_COMPARE_F32: f32 = PWM_MIN_COMPARE as f32;
+const PWM_MAX_COMPARE_F32: f32 = PWM_MAX_COMPARE as f32;
 const PWM_COUNTS_PER_VOLT: f32 = PWM_PERIOD as f32 / NOMINAL_VBUS_V;
 
 const HRTIM_TIMCR_CONT: u32 = 1 << 3;
@@ -69,6 +72,9 @@ pub struct PwmConfig {
     pub deadtime_counts: u32,
     pub min_compare_counts: u32,
     pub max_compare_counts: u32,
+    pub zero_compare_counts_f32: f32,
+    pub min_compare_counts_f32: f32,
+    pub max_compare_counts_f32: f32,
     pub nominal_vbus_v: f32,
     pub counts_per_volt: f32,
 }
@@ -81,6 +87,9 @@ impl PwmConfig {
         deadtime_counts: DEADTIME_COUNTS,
         min_compare_counts: PWM_MIN_COMPARE,
         max_compare_counts: PWM_MAX_COMPARE,
+        zero_compare_counts_f32: PWM_ZERO_COMPARE_F32,
+        min_compare_counts_f32: PWM_MIN_COMPARE_F32,
+        max_compare_counts_f32: PWM_MAX_COMPARE_F32,
         nominal_vbus_v: NOMINAL_VBUS_V,
         counts_per_volt: PWM_COUNTS_PER_VOLT,
     };
@@ -190,11 +199,11 @@ impl SafeZeroPwm {
 
     #[inline(always)]
     fn compare_from_voltage(&self, voltage: f32) -> u32 {
-        let scaled = voltage * self.config.counts_per_volt + self.config.zero_compare_counts as f32;
+        let scaled = voltage * self.config.counts_per_volt + self.config.zero_compare_counts_f32;
         clamp_compare(
             scaled,
-            self.config.min_compare_counts,
-            self.config.max_compare_counts,
+            self.config.min_compare_counts_f32,
+            self.config.max_compare_counts_f32,
         )
     }
 }
@@ -219,23 +228,19 @@ const fn max_u32(a: u32, b: u32) -> u32 {
 }
 
 #[inline(always)]
-fn clamp_compare(value: f32, min: u32, max: u32) -> u32 {
+fn clamp_compare(value: f32, min: f32, max: f32) -> u32 {
     debug_assert!(value.is_finite());
 
-    let clamped_high = if value > max as f32 {
-        max as f32
-    } else {
-        value
-    };
-    let clamped = if clamped_high < min as f32 {
-        min as f32
+    let clamped_high = if value > max { max } else { value };
+    let clamped = if clamped_high < min {
+        min
     } else {
         clamped_high
     };
 
     // SAFETY: the current firmware only derives PWM commands from finite ADC
-    // samples and finite constants. clamped is explicitly bounded to [min, max],
-    // where both bounds are valid u32 compare register values.
+    // samples and finite constants. clamped is explicitly bounded to valid u32
+    // compare register values represented exactly as f32.
     unsafe { clamped.to_int_unchecked::<u32>() }
 }
 
@@ -277,6 +282,9 @@ mod tests {
         assert_eq!(config.deadtime_counts, 272);
         assert_eq!(config.min_compare_counts, 2_720);
         assert_eq!(config.max_compare_counts, 54_335);
+        assert_eq!(config.zero_compare_counts_f32, 27_200.0);
+        assert_eq!(config.min_compare_counts_f32, 2_720.0);
+        assert_eq!(config.max_compare_counts_f32, 54_335.0);
         assert_eq!(config.nominal_vbus_v, 12.0);
         assert_eq!(config.counts_per_volt, 54_400.0 / 12.0);
     }
@@ -288,24 +296,24 @@ mod tests {
         assert_eq!(
             clamp_compare(
                 1.5 * config.counts_per_volt + config.zero_compare_counts as f32,
-                config.min_compare_counts,
-                config.max_compare_counts
+                config.min_compare_counts_f32,
+                config.max_compare_counts_f32
             ),
             34_000,
         );
         assert_eq!(
             clamp_compare(
                 -100.0 * config.counts_per_volt + config.zero_compare_counts as f32,
-                config.min_compare_counts,
-                config.max_compare_counts
+                config.min_compare_counts_f32,
+                config.max_compare_counts_f32
             ),
             config.min_compare_counts,
         );
         assert_eq!(
             clamp_compare(
                 100.0 * config.counts_per_volt + config.zero_compare_counts as f32,
-                config.min_compare_counts,
-                config.max_compare_counts
+                config.min_compare_counts_f32,
+                config.max_compare_counts_f32
             ),
             config.max_compare_counts,
         );
