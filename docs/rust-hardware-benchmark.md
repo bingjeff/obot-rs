@@ -211,3 +211,51 @@ Interpretation at 170 MHz:
 Comparison caveat:
 
 This build configures ADC3/4/5 injected current channels, starts HRTIM-triggered injected conversions, and reads the resulting injected data registers in the fast loop. It keeps all HRTIM outputs disabled and still does not include ADC1/ADC2 housekeeping, bus voltage, temperature/vref scaling, current-control math, voltage control, safety/fault handling, or host API parity.
+
+
+## 2026-05-31: Current Conversion Surface, J-Link Debug Readout
+
+Firmware commits:
+
+- `7e0a3f6 Add current conversion core`
+- `4486180 Enable FPU at startup`
+
+Build and flash steps used:
+
+```sh
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+/home/bingjeff/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy \
+  -O binary \
+  target/thumbv7em-none-eabihf/release/obot-g474 \
+  target/thumbv7em-none-eabihf/release/obot-g474.bin
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink
+```
+
+Release artifact sizes:
+
+```text
+133328 target/thumbv7em-none-eabihf/release/obot-g474
+  8900 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+Representative readout after flashing with FPU enabled:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 354, 3467, 140, 17141, 173.259, 3399.704, 139.355, 16985.418
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `173.259 cycles = 1.019 us`.
+- Main-loop mean execution: `139.355 cycles = 0.820 us`.
+- Fast-loop mean period: `3399.704 cycles = 19.998 us`.
+- Main-loop mean period: `16985.418 cycles = 99.914 us` in the sampled running average.
+- Combined 100 us max safe-zero-PWM-plus-hall-plus-current-conversion load: `(5 * 354 + 140) / 17000 = 11.24%`.
+- Combined 100 us mean safe-zero-PWM-plus-hall-plus-current-conversion load: `(5 * 173.259 + 139.355) / 17000 = 5.92%`.
+- Incremental mean fast-loop cost over raw current ADC readback: `173.259 - 144.001 = 29.258 cycles = 0.172 us`.
+
+Comparison caveat:
+
+This build converts raw ADC3/4/5 current samples using the C++ `motor_hall` gain/bias formula and leaves all HRTIM outputs disabled. FOC d/q transform, current filtering, PI current control, voltage command generation, safety/fault handling, and host API parity remain unimplemented.
