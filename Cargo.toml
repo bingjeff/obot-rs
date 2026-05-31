@@ -19,3 +19,7 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 alloc_instead_of_core = "deny"
 std_instead_of_core = "deny"
+[profile.release]
+codegen-units = 1
+lto = "fat"
+
