@@ -41,6 +41,8 @@ To inspect why outputs are blocked or allowed, read the output-safety packet thr
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-output-safety-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474
 ```
 
+The output-safety readout includes a `host_timed_out` field so a stale output command is distinguishable from command, bus, driver, and controller gates.
+
 To clear a latched controller fault through the debug command packet, use the explicit clear-faults mode:
 
 ```sh

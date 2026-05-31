@@ -789,7 +789,7 @@ fn jlink_script(options: &JlinkOptions) -> String {
 
 fn jlink_read_script(options: &JlinkOptions, len: usize) -> String {
     format!(
-        "device {}\nif SWD\nspeed {}\nconnect\nmem8 0x{:08X} {}\nexit\n",
+        "device {}\nif SWD\nspeed {}\nconnect\nmem8 0x{:08X} {}\ng\nexit\n",
         options.device, options.speed_khz, options.address, len
     )
 }
@@ -822,7 +822,7 @@ fn jlink_write_raw_packet_script(
         ));
     }
     script.push_str(&format!(
-        "w1 0x{:08X}, 0x{:02X}\nexit\n",
+        "w1 0x{:08X}, 0x{:02X}\ng\nexit\n",
         sequence_address, sequence
     ));
     script
@@ -933,7 +933,7 @@ fn format_driver_csv(name: &str, packet: DriverReportPacket) -> String {
 fn format_output_safety_csv(name: &str, packet: OutputSafetyPacket) -> String {
     let status = packet.status;
     format!(
-        "name, sequence, output_allowed, command_blocked, bus_blocked, driver_not_enabled, driver_fault_latched, controller_faulted\n{}, {}, {}, {}, {}, {}, {}, {}\n",
+        "name, sequence, output_allowed, command_blocked, bus_blocked, driver_not_enabled, driver_fault_latched, controller_faulted, host_timed_out\n{}, {}, {}, {}, {}, {}, {}, {}, {}\n",
         name,
         packet.sequence,
         status.output_allowed,
@@ -942,6 +942,7 @@ fn format_output_safety_csv(name: &str, packet: OutputSafetyPacket) -> String {
         status.driver_not_enabled,
         status.driver_fault_latched,
         status.controller_faulted,
+        status.host_timed_out,
     )
 }
 
@@ -1316,13 +1317,14 @@ mod tests {
                     driver_not_enabled: true,
                     driver_fault_latched: false,
                     controller_faulted: true,
+                    host_timed_out: true,
                 },
             },
         );
 
         assert_eq!(
             output,
-            "name, sequence, output_allowed, command_blocked, bus_blocked, driver_not_enabled, driver_fault_latched, controller_faulted\nrust, 5, false, true, true, true, false, true\n"
+            "name, sequence, output_allowed, command_blocked, bus_blocked, driver_not_enabled, driver_fault_latched, controller_faulted, host_timed_out\nrust, 5, false, true, true, true, false, true, true\n"
         );
     }
 
@@ -1413,6 +1415,6 @@ mod tests {
         assert!(script.contains("w1 0x20000090, 0x07\n"));
         assert!(script.contains("w1 0x20000091, 0x01\n"));
         assert!(script.contains("w1 0x20000094, 0xA0\n"));
-        assert!(script.ends_with("w1 0x2000009E, 0x07\nexit\n"));
+        assert!(script.ends_with("w1 0x2000009E, 0x07\ng\nexit\n"));
     }
 }

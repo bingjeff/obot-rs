@@ -91,11 +91,13 @@ pub fn poll_command(last_sequence: &mut u8) -> Option<CommandPacket> {
 
     match CommandPacket::decode(&bytes) {
         Ok(packet) if packet.sequence == sequence => {
-            *last_sequence = sequence;
+            clear_command_sequence();
+            *last_sequence = 0;
             Some(packet)
         }
         Ok(_) | Err(_) => {
-            *last_sequence = sequence;
+            clear_command_sequence();
+            *last_sequence = 0;
             None
         }
     }
@@ -115,14 +117,24 @@ pub fn poll_driver_command(last_sequence: &mut u8) -> Option<DriverCommandPacket
 
     match DriverCommandPacket::decode(&bytes) {
         Ok(packet) if packet.sequence == sequence => {
-            *last_sequence = sequence;
+            clear_driver_command_sequence();
+            *last_sequence = 0;
             Some(packet)
         }
         Ok(_) | Err(_) => {
-            *last_sequence = sequence;
+            clear_driver_command_sequence();
+            *last_sequence = 0;
             None
         }
     }
+}
+
+fn clear_command_sequence() {
+    unsafe { write_volatile(addr_of_mut!(OBOT_COMMAND_PACKET_SEQUENCE), 0) };
+}
+
+fn clear_driver_command_sequence() {
+    unsafe { write_volatile(addr_of_mut!(OBOT_DRIVER_COMMAND_PACKET_SEQUENCE), 0) };
 }
 
 pub fn publish_status(packet: StatusPacket) {

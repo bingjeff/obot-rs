@@ -298,7 +298,7 @@ const fn fault_from_u8(value: u8) -> Result<Option<Fault>, DecodeError> {
     }
 }
 
-const OUTPUT_SAFETY_KNOWN_FLAGS: u8 = 0x3f;
+const OUTPUT_SAFETY_KNOWN_FLAGS: u8 = 0x7f;
 
 const fn output_safety_flags_to_u8(status: OutputSafetyStatus) -> u8 {
     bool_to_u8(status.output_allowed)
@@ -307,6 +307,7 @@ const fn output_safety_flags_to_u8(status: OutputSafetyStatus) -> u8 {
         | (bool_to_u8(status.driver_not_enabled) << 3)
         | (bool_to_u8(status.driver_fault_latched) << 4)
         | (bool_to_u8(status.controller_faulted) << 5)
+        | (bool_to_u8(status.host_timed_out) << 6)
 }
 
 const fn bool_to_u8(value: bool) -> u8 {
@@ -325,6 +326,7 @@ const fn output_safety_flags_from_u8(value: u8) -> Result<OutputSafetyStatus, De
         driver_not_enabled: value & (1 << 3) != 0,
         driver_fault_latched: value & (1 << 4) != 0,
         controller_faulted: value & (1 << 5) != 0,
+        host_timed_out: value & (1 << 6) != 0,
     })
 }
 
@@ -436,18 +438,19 @@ mod tests {
                 driver_not_enabled: true,
                 driver_fault_latched: false,
                 controller_faulted: true,
+                host_timed_out: true,
             },
         };
         let encoded = packet.encode();
 
-        assert_eq!(encoded, [12, 0b0010_1101]);
+        assert_eq!(encoded, [12, 0b0110_1101]);
         assert_eq!(OutputSafetyPacket::decode(&encoded).unwrap(), packet);
     }
 
     #[test]
     fn rejects_unknown_output_safety_flags() {
         assert_eq!(
-            OutputSafetyPacket::decode(&[0, 0x40]).unwrap_err(),
+            OutputSafetyPacket::decode(&[0, 0x80]).unwrap_err(),
             DecodeError::InvalidOutputSafetyFlags
         );
     }

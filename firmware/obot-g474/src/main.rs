@@ -10,11 +10,9 @@ mod debug_report;
 mod startup;
 
 #[cfg(target_os = "none")]
-use core::{
-    cell::UnsafeCell,
-    panic::PanicInfo,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use core::{cell::UnsafeCell, panic::PanicInfo};
+#[cfg(target_os = "none")]
+use obot_core::MotorCommand;
 #[cfg(target_os = "none")]
 use obot_core::benchmark::{BenchmarkReport, LoopBenchmark};
 use obot_core::{
@@ -26,6 +24,7 @@ use obot_core::{
     current::CurrentCalibration,
     foc::{FocCommand, FocController, FocDesired, FocMeasured, FocParam},
     hall::HallElectricalAngle,
+    host::{HostCommandWatchdog, HostCommandWatchdogStatus},
     output::{OutputSafety, OutputSafetyInputs, OutputSafetyStatus},
     power::OutputGate,
 };
@@ -48,6 +47,8 @@ use obot_protocol::{
 
 #[cfg(target_os = "none")]
 const FAST_LOOP_DT_S: f32 = 1.0 / 50_000.0;
+#[cfg(target_os = "none")]
+const HOST_COMMAND_TIMEOUT_MAIN_TICKS: u32 = 1_000;
 
 const LIMITS: Limits = Limits {
     max_torque_nm: 2.0,
@@ -83,6 +84,7 @@ fn firmware_main() -> ! {
     let mut driver_command_sequence = 0;
     let mut driver_report_sequence = 0;
     let mut output_safety_sequence = 0;
+    let mut host_watchdog = HostCommandWatchdog::new(HOST_COMMAND_TIMEOUT_MAIN_TICKS);
     if clock::configure_170mhz_hsi().is_err() {
         loop {
             core::hint::spin_loop();
@@ -138,8 +140,14 @@ fn firmware_main() -> ! {
         if poll.main {
             let mut driver_action_completed = false;
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
-                let (command_allows_output, controller_faulted, clear_output_safety_faults) =
-                    service_host_debug(&mut command_sequence, status_sequence);
+                let host_poll = service_host_debug(&mut command_sequence);
+                let host_status =
+                    update_host_watchdog(&mut host_watchdog, host_poll.command_allows_output);
+                if host_status.timed_out {
+                    force_controller_disabled();
+                }
+                let controller_state = controller_storage_mut().state();
+                publish_status_report(status_sequence, controller_state);
                 status_sequence = status_sequence.wrapping_add(1);
                 driver_action_completed = service_driver_debug(
                     &driver,
@@ -151,19 +159,16 @@ fn firmware_main() -> ! {
                 bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
                 let output_safety_status = update_output_safety(
                     &driver,
-                    command_allows_output,
+                    host_status.output_allowed,
                     output_gate.allows_output_raw(bus_voltage_raw),
-                    controller_faulted,
-                    clear_output_safety_faults,
+                    controller_state.fault.is_some(),
+                    host_status.timed_out,
+                    host_poll.clear_output_safety_faults,
                 );
                 output_allowed = output_safety_status.output_allowed;
                 output_safety_sequence =
                     publish_output_safety_report(output_safety_sequence, output_safety_status);
-                core::hint::black_box((
-                    command_allows_output,
-                    controller_faulted,
-                    clear_output_safety_faults,
-                ));
+                core::hint::black_box((host_poll, host_status, controller_state.fault));
             });
             if driver_action_completed {
                 fast_benchmark = LoopBenchmark::new();
@@ -193,9 +198,6 @@ unsafe impl Sync for ControllerStorage {}
 static CONTROLLER: ControllerStorage = ControllerStorage(UnsafeCell::new(Controller::new(LIMITS)));
 
 #[cfg(target_os = "none")]
-static COMMAND_ALLOWS_OUTPUT: AtomicBool = AtomicBool::new(false);
-
-#[cfg(target_os = "none")]
 struct OutputSafetyStorage(UnsafeCell<OutputSafety>);
 
 #[cfg(target_os = "none")]
@@ -206,24 +208,45 @@ static OUTPUT_SAFETY: OutputSafetyStorage =
     OutputSafetyStorage(UnsafeCell::new(OutputSafety::new()));
 
 #[cfg(target_os = "none")]
-#[inline(never)]
-fn service_host_debug(command_sequence: &mut u8, status_sequence: u8) -> (bool, bool, bool) {
-    let controller = controller_storage_mut();
-    let mut clear_output_safety_faults = false;
-    if let Some(packet) = debug_report::poll_command(command_sequence) {
-        let (command_allows_output, clear_faults_accepted) =
-            apply_host_command(controller, packet.command);
-        COMMAND_ALLOWS_OUTPUT.store(command_allows_output, Ordering::Relaxed);
-        clear_output_safety_faults = clear_faults_accepted;
-    }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HostDebugPoll {
+    command_allows_output: Option<bool>,
+    clear_output_safety_faults: bool,
+}
 
-    let state = controller.state();
-    publish_status_report(status_sequence, state);
-    (
-        COMMAND_ALLOWS_OUTPUT.load(Ordering::Relaxed),
-        state.fault.is_some(),
-        clear_output_safety_faults,
-    )
+#[cfg(target_os = "none")]
+#[inline(never)]
+fn service_host_debug(command_sequence: &mut u8) -> HostDebugPoll {
+    let Some(packet) = debug_report::poll_command(command_sequence) else {
+        return HostDebugPoll::default();
+    };
+
+    let (command_allows_output, clear_faults_accepted) =
+        apply_host_command(controller_storage_mut(), packet.command);
+
+    HostDebugPoll {
+        command_allows_output: Some(command_allows_output),
+        clear_output_safety_faults: clear_faults_accepted,
+    }
+}
+
+#[cfg(target_os = "none")]
+fn update_host_watchdog(
+    watchdog: &mut HostCommandWatchdog,
+    command_allows_output: Option<bool>,
+) -> HostCommandWatchdogStatus {
+    match command_allows_output {
+        Some(command_allows_output) => watchdog.observe_command(command_allows_output),
+        None => watchdog.tick(),
+    }
+}
+
+#[cfg(target_os = "none")]
+fn force_controller_disabled() {
+    let _ = controller_storage_mut().apply(MotorCommand {
+        mode: ControlMode::Disabled,
+        ..MotorCommand::default()
+    });
 }
 
 #[cfg(target_os = "none")]
@@ -347,6 +370,7 @@ fn update_output_safety(
     command_allows_output: bool,
     bus_allows_output: bool,
     controller_faulted: bool,
+    host_timed_out: bool,
     clear_latched_faults: bool,
 ) -> OutputSafetyStatus {
     let safety = output_safety_storage_mut();
@@ -361,6 +385,7 @@ fn update_output_safety(
         driver_enabled: driver_status.enabled,
         driver_faulted: driver_status.faulted,
         controller_faulted,
+        host_timed_out,
     });
     core::hint::black_box(status);
     status

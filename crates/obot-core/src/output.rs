@@ -5,6 +5,7 @@ pub struct OutputSafetyInputs {
     pub driver_enabled: bool,
     pub driver_faulted: bool,
     pub controller_faulted: bool,
+    pub host_timed_out: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -15,6 +16,7 @@ pub struct OutputSafetyStatus {
     pub driver_not_enabled: bool,
     pub driver_fault_latched: bool,
     pub controller_faulted: bool,
+    pub host_timed_out: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -39,7 +41,8 @@ impl OutputSafety {
             && !bus_blocked
             && !driver_not_enabled
             && !self.driver_fault_latched
-            && !inputs.controller_faulted;
+            && !inputs.controller_faulted
+            && !inputs.host_timed_out;
 
         OutputSafetyStatus {
             output_allowed,
@@ -48,6 +51,7 @@ impl OutputSafety {
             driver_not_enabled,
             driver_fault_latched: self.driver_fault_latched,
             controller_faulted: inputs.controller_faulted,
+            host_timed_out: inputs.host_timed_out,
         }
     }
 
@@ -67,6 +71,7 @@ mod tests {
             driver_enabled: true,
             driver_faulted: false,
             controller_faulted: false,
+            host_timed_out: false,
         }
     }
 
@@ -97,6 +102,12 @@ mod tests {
         let mut inputs = allowed_inputs();
         inputs.controller_faulted = true;
         assert!(safety.update(inputs).controller_faulted);
+
+        let mut inputs = allowed_inputs();
+        inputs.host_timed_out = true;
+        let status = safety.update(inputs);
+        assert!(!status.output_allowed);
+        assert!(status.host_timed_out);
     }
 
     #[test]

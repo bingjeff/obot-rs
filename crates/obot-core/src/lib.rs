@@ -4,6 +4,7 @@ pub mod benchmark;
 pub mod current;
 pub mod foc;
 pub mod hall;
+pub mod host;
 pub mod output;
 pub mod power;
 pub mod timing;
