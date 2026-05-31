@@ -42,7 +42,8 @@ use obot_g474::hall::HallInputs;
 use obot_g474::pwm::SafeZeroPwm;
 #[cfg(target_os = "none")]
 use obot_protocol::{
-    BenchmarkPacket, DriverCommand, DriverReportPacket, OutputSafetyPacket, StatusPacket,
+    BenchmarkPacket, BusVoltagePacket, DriverCommand, DriverReportPacket, OutputSafetyPacket,
+    StatusPacket,
 };
 
 #[cfg(target_os = "none")]
@@ -84,6 +85,7 @@ fn firmware_main() -> ! {
     let mut driver_command_sequence = 0;
     let mut driver_report_sequence = 0;
     let mut output_safety_sequence = 0;
+    let mut bus_voltage_sequence = 0;
     let mut host_watchdog = HostCommandWatchdog::new(HOST_COMMAND_TIMEOUT_MAIN_TICKS);
     if clock::configure_170mhz_hsi().is_err() {
         loop {
@@ -157,6 +159,8 @@ fn firmware_main() -> ! {
                     &mut driver_report_sequence,
                 );
                 bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
+                bus_voltage_sequence =
+                    publish_bus_voltage_report(bus_voltage_sequence, bus_voltage_raw);
                 let output_safety_status = update_output_safety(
                     &driver,
                     host_status.output_allowed,
@@ -359,6 +363,16 @@ fn publish_output_safety_report(sequence: u8, status: OutputSafetyStatus) -> u8 
     core::hint::black_box((
         debug_report::output_safety_packet_ptr(),
         debug_report::output_safety_packet_len(),
+    ));
+    sequence.wrapping_add(1)
+}
+
+#[cfg(target_os = "none")]
+fn publish_bus_voltage_report(sequence: u8, raw: u16) -> u8 {
+    debug_report::publish_bus_voltage(BusVoltagePacket { sequence, raw });
+    core::hint::black_box((
+        debug_report::bus_voltage_packet_ptr(),
+        debug_report::bus_voltage_packet_len(),
     ));
     sequence.wrapping_add(1)
 }

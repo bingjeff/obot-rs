@@ -4,11 +4,15 @@ use std::{
     process::{Command, ExitCode},
 };
 
-use obot_core::{ControlMode, MotorCommand};
+use obot_core::{
+    ControlMode, MotorCommand,
+    power::{BusVoltageCalibration, OutputGate},
+};
 use obot_protocol::{
-    BENCHMARK_PACKET_LEN, BenchmarkPacket, CommandPacket, DRIVER_REPORT_PACKET_LEN, DriverCommand,
-    DriverCommandPacket, DriverReportPacket, OUTPUT_SAFETY_PACKET_LEN, OutputSafetyPacket,
-    STATUS_PACKET_LEN, StatusPacket,
+    BENCHMARK_PACKET_LEN, BUS_VOLTAGE_PACKET_LEN, BenchmarkPacket, BusVoltagePacket,
+    CommandPacket, DRIVER_REPORT_PACKET_LEN, DriverCommand, DriverCommandPacket,
+    DriverReportPacket, OUTPUT_SAFETY_PACKET_LEN, OutputSafetyPacket, STATUS_PACKET_LEN,
+    StatusPacket,
 };
 
 const DEFAULT_NAME: &str = "rust_debug";
@@ -17,6 +21,7 @@ const DEFAULT_ADDRESS: u32 = 0x2000_0000;
 const DEFAULT_SPEED_KHZ: u32 = 4_000;
 const DEFAULT_ELF_PATH: &str = "target/thumbv7em-none-eabihf/release/obot-g474";
 const BENCHMARK_PACKET_SYMBOL: &str = "OBOT_BENCHMARK_PACKET";
+const BUS_VOLTAGE_PACKET_SYMBOL: &str = "OBOT_BUS_VOLTAGE_PACKET";
 const COMMAND_PACKET_SYMBOL: &str = "OBOT_COMMAND_PACKET";
 const COMMAND_SEQUENCE_SYMBOL: &str = "OBOT_COMMAND_PACKET_SEQUENCE";
 const DRIVER_COMMAND_PACKET_SYMBOL: &str = "OBOT_DRIVER_COMMAND_PACKET";
@@ -52,12 +57,14 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "decode-status-hex" => decode_status_hex_command(rest),
         "decode-driver-hex" => decode_driver_hex_command(rest),
         "decode-output-safety-hex" => decode_output_safety_hex_command(rest),
+        "decode-bus-voltage-hex" => decode_bus_voltage_hex_command(rest),
         "read-jlink" => read_jlink_command(rest),
         "read-jlink-detail" => read_jlink_detail_command(rest),
         "run-stats-jlink" => run_stats_jlink_command(rest),
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
         "read-output-safety-jlink" => read_output_safety_jlink_command(rest),
+        "read-bus-voltage-jlink" => read_bus_voltage_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
         "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
         "jlink-script" => jlink_script_command(rest),
@@ -135,6 +142,15 @@ fn decode_output_safety_hex_command(args: &[String]) -> Result<String, String> {
     decode_output_safety_csv(&bytes)
 }
 
+fn decode_bus_voltage_hex_command(args: &[String]) -> Result<String, String> {
+    if args.is_empty() {
+        return Err("decode-bus-voltage-hex requires packet bytes".to_string());
+    }
+
+    let bytes = parse_hex_bytes(&args.join(" "))?;
+    decode_bus_voltage_csv(&bytes)
+}
+
 fn read_jlink_command(args: &[String]) -> Result<String, String> {
     let options = JlinkOptions::parse(args)?;
     let bytes = read_jlink_bytes(&options, BENCHMARK_PACKET_LEN)?;
@@ -173,6 +189,13 @@ fn read_output_safety_jlink_command(args: &[String]) -> Result<String, String> {
     let jlink = options.resolve(OUTPUT_SAFETY_PACKET_SYMBOL)?;
     let bytes = read_jlink_bytes(&jlink, OUTPUT_SAFETY_PACKET_LEN)?;
     decode_output_safety_csv(&bytes)
+}
+
+fn read_bus_voltage_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = SymbolReadOptions::parse(args)?;
+    let jlink = options.resolve(BUS_VOLTAGE_PACKET_SYMBOL)?;
+    let bytes = read_jlink_bytes(&jlink, BUS_VOLTAGE_PACKET_LEN)?;
+    decode_bus_voltage_csv(&bytes)
 }
 
 fn read_jlink_bytes(options: &JlinkOptions, len: usize) -> Result<Vec<u8>, String> {
@@ -869,6 +892,11 @@ fn decode_output_safety_csv(bytes: &[u8]) -> Result<String, String> {
     Ok(format_output_safety_csv(DEFAULT_NAME, packet))
 }
 
+fn decode_bus_voltage_csv(bytes: &[u8]) -> Result<String, String> {
+    let packet = decode_bus_voltage_packet(bytes)?;
+    Ok(format_bus_voltage_csv(DEFAULT_NAME, packet))
+}
+
 fn decode_status_packet(bytes: &[u8]) -> Result<StatusPacket, String> {
     if bytes.len() != STATUS_PACKET_LEN {
         return Err(format!(
@@ -903,6 +931,18 @@ fn decode_output_safety_packet(bytes: &[u8]) -> Result<OutputSafetyPacket, Strin
     }
 
     OutputSafetyPacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
+}
+
+fn decode_bus_voltage_packet(bytes: &[u8]) -> Result<BusVoltagePacket, String> {
+    if bytes.len() != BUS_VOLTAGE_PACKET_LEN {
+        return Err(format!(
+            "expected {} bus voltage bytes, got {}",
+            BUS_VOLTAGE_PACKET_LEN,
+            bytes.len()
+        ));
+    }
+
+    BusVoltagePacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
 }
 
 fn format_status_csv(name: &str, packet: StatusPacket) -> String {
@@ -943,6 +983,15 @@ fn format_output_safety_csv(name: &str, packet: OutputSafetyPacket) -> String {
         status.driver_fault_latched,
         status.controller_faulted,
         status.host_timed_out,
+    )
+}
+
+fn format_bus_voltage_csv(name: &str, packet: BusVoltagePacket) -> String {
+    let sample = BusVoltageCalibration::MOTOR_HALL.convert(packet.raw);
+    let bus_allows_output = OutputGate::MOTOR_HALL.allows_output_raw(packet.raw);
+    format!(
+        "name, sequence, bus_voltage_raw, bus_voltage_volts, bus_allows_output\n{}, {}, {}, {:.3}, {}\n",
+        name, packet.sequence, packet.raw, sample.volts, bus_allows_output,
     )
 }
 
@@ -1091,6 +1140,7 @@ fn usage() -> String {
   obot-bench-debug decode-status-hex <{} status bytes as hex>
   obot-bench-debug decode-driver-hex <{} driver report bytes as hex>
   obot-bench-debug decode-output-safety-hex <{} output safety bytes as hex>
+  obot-bench-debug decode-bus-voltage-hex <{} bus voltage bytes as hex>
   obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
@@ -1098,6 +1148,7 @@ fn usage() -> String {
   obot-bench-debug read-status-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <status-packet-address>] [--speed 4000]
   obot-bench-debug read-driver-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <driver-report-address>] [--speed 4000]
   obot-bench-debug read-output-safety-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <output-safety-address>] [--speed 4000]
+  obot-bench-debug read-bus-voltage-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <bus-voltage-address>] [--speed 4000]
   obot-bench-debug write-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <command-packet-address>] [--sequence-address <command-sequence-address>] [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
   obot-bench-debug write-driver-command-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--packet-address <driver-command-packet-address>] [--sequence-address <driver-command-sequence-address>] [--sequence N] [--command disable|configure-enable]
 ",
@@ -1107,7 +1158,8 @@ fn usage() -> String {
         BENCHMARK_PACKET_LEN,
         STATUS_PACKET_LEN,
         DRIVER_REPORT_PACKET_LEN,
-        OUTPUT_SAFETY_PACKET_LEN
+        OUTPUT_SAFETY_PACKET_LEN,
+        BUS_VOLTAGE_PACKET_LEN
     )
 }
 
@@ -1325,6 +1377,22 @@ mod tests {
         assert_eq!(
             output,
             "name, sequence, output_allowed, command_blocked, bus_blocked, driver_not_enabled, driver_fault_latched, controller_faulted, host_timed_out\nrust, 5, false, true, true, true, false, true, true\n"
+        );
+    }
+
+    #[test]
+    fn formats_bus_voltage_csv() {
+        let output = format_bus_voltage_csv(
+            "rust",
+            BusVoltagePacket {
+                sequence: 6,
+                raw: OutputGate::MOTOR_HALL.min_raw,
+            },
+        );
+
+        assert_eq!(
+            output,
+            "name, sequence, bus_voltage_raw, bus_voltage_volts, bus_allows_output\nrust, 6, 1963, 8.000, true\n"
         );
     }
 

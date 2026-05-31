@@ -43,6 +43,12 @@ cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-output-safet
 
 The output-safety readout includes a `host_timed_out` field so a stale output command is distinguishable from command, bus, driver, and controller gates.
 
+To inspect the raw bus-voltage sample behind the `bus_blocked` gate:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-bus-voltage-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474
+```
+
 To clear a latched controller fault through the debug command packet, use the explicit clear-faults mode:
 
 ```sh

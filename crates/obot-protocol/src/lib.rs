@@ -11,6 +11,7 @@ pub const DRIVER_COMMAND_PACKET_LEN: usize = 2;
 pub const STATUS_PACKET_LEN: usize = 14;
 pub const DRIVER_REPORT_PACKET_LEN: usize = 14;
 pub const OUTPUT_SAFETY_PACKET_LEN: usize = 2;
+pub const BUS_VOLTAGE_PACKET_LEN: usize = 3;
 pub const BENCHMARK_PACKET_LEN: usize = 81;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,6 +172,31 @@ impl OutputSafetyPacket {
         Ok(Self {
             sequence: bytes[0],
             status: output_safety_flags_from_u8(bytes[1])?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BusVoltagePacket {
+    pub sequence: u8,
+    pub raw: u16,
+}
+
+impl BusVoltagePacket {
+    pub fn encode(self) -> [u8; BUS_VOLTAGE_PACKET_LEN] {
+        let mut out = [0; BUS_VOLTAGE_PACKET_LEN];
+        out[0] = self.sequence;
+        out[1..3].copy_from_slice(&self.raw.to_le_bytes());
+        out
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let bytes: &[u8; BUS_VOLTAGE_PACKET_LEN] =
+            input.try_into().map_err(|_| DecodeError::InvalidLength)?;
+
+        Ok(Self {
+            sequence: bytes[0],
+            raw: u16::from_le_bytes(bytes[1..3].try_into().unwrap()),
         })
     }
 }
@@ -445,6 +471,17 @@ mod tests {
 
         assert_eq!(encoded, [12, 0b0110_1101]);
         assert_eq!(OutputSafetyPacket::decode(&encoded).unwrap(), packet);
+    }
+
+    #[test]
+    fn bus_voltage_packet_round_trips() {
+        let packet = BusVoltagePacket {
+            sequence: 4,
+            raw: 1_963,
+        };
+
+        assert_eq!(packet.encode(), [4, 0xAB, 0x07]);
+        assert_eq!(BusVoltagePacket::decode(&packet.encode()).unwrap(), packet);
     }
 
     #[test]
