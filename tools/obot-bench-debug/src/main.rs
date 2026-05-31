@@ -571,8 +571,9 @@ fn parse_control_mode(value: &str) -> Result<ControlMode, String> {
         "torque" => Ok(ControlMode::Torque),
         "velocity" => Ok(ControlMode::Velocity),
         "position" => Ok(ControlMode::Position),
+        "clear-faults" | "clear_faults" => Ok(ControlMode::ClearFaults),
         _ => Err(format!(
-            "invalid --mode `{value}`; expected disabled, torque, velocity, or position"
+            "invalid --mode `{value}`; expected disabled, torque, velocity, position, or clear-faults"
         )),
     }
 }
@@ -962,7 +963,7 @@ fn usage() -> String {
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-status-jlink --address <status-packet-address> [--speed 4000]
   obot-bench-debug read-driver-jlink --address <driver-report-address> [--speed 4000]
-  obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position] [--torque Nm] [--velocity rad_s] [--position rad]
+  obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
   obot-bench-debug write-driver-command-jlink --packet-address <driver-command-packet-address> --sequence-address <driver-command-sequence-address> [--sequence N] [--command disable|configure-enable]
 ",
         BENCHMARK_PACKET_LEN,
@@ -1208,6 +1209,18 @@ mod tests {
         assert_eq!(options.sequence, 7);
         assert_eq!(options.mode, ControlMode::Torque);
         assert_eq!(options.torque_nm, 1.5);
+    }
+
+    #[test]
+    fn parses_clear_faults_command_mode() {
+        assert_eq!(
+            parse_control_mode("clear-faults").unwrap(),
+            ControlMode::ClearFaults
+        );
+        assert_eq!(
+            parse_control_mode("clear_faults").unwrap(),
+            ControlMode::ClearFaults
+        );
     }
 
     #[test]

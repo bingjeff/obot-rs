@@ -237,6 +237,7 @@ const fn mode_to_u8(mode: ControlMode) -> u8 {
         ControlMode::Torque => 1,
         ControlMode::Velocity => 2,
         ControlMode::Position => 3,
+        ControlMode::ClearFaults => 250,
     }
 }
 
@@ -246,6 +247,7 @@ const fn mode_from_u8(value: u8) -> Result<ControlMode, DecodeError> {
         1 => Ok(ControlMode::Torque),
         2 => Ok(ControlMode::Velocity),
         3 => Ok(ControlMode::Position),
+        250 => Ok(ControlMode::ClearFaults),
         _ => Err(DecodeError::InvalidMode),
     }
 }
@@ -306,6 +308,21 @@ mod tests {
         };
 
         assert_eq!(CommandPacket::decode(&packet.encode()).unwrap(), packet);
+    }
+
+    #[test]
+    fn clear_faults_mode_matches_cpp_value() {
+        let packet = CommandPacket {
+            sequence: 1,
+            command: MotorCommand {
+                mode: ControlMode::ClearFaults,
+                ..MotorCommand::default()
+            },
+        };
+        let encoded = packet.encode();
+
+        assert_eq!(encoded[1], 250);
+        assert_eq!(CommandPacket::decode(&encoded).unwrap(), packet);
     }
 
     #[test]

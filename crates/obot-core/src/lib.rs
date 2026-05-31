@@ -23,6 +23,7 @@ pub enum ControlMode {
     Torque,
     Velocity,
     Position,
+    ClearFaults,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -84,6 +85,15 @@ impl Controller {
     }
 
     pub fn apply(&mut self, command: MotorCommand) -> Result<MotorState, Fault> {
+        if command.mode == ControlMode::ClearFaults {
+            self.clear_fault();
+            return Ok(self.state);
+        }
+
+        if let Some(fault) = self.state.fault {
+            return Err(fault);
+        }
+
         if !command.torque_nm.is_finite()
             || !command.velocity_rad_s.is_finite()
             || !command.position_rad.is_finite()
@@ -119,13 +129,14 @@ impl Controller {
                 position_rad: command.position_rad,
                 ..MotorState::default()
             },
+            ControlMode::ClearFaults => unreachable!(),
         };
 
         Ok(self.state)
     }
 
     pub fn clear_fault(&mut self) {
-        self.state.fault = None;
+        self.state = MotorState::default();
     }
 
     fn latch_fault(&mut self, fault: Fault) -> Result<MotorState, Fault> {
@@ -176,5 +187,50 @@ mod tests {
 
         assert_eq!(fault, Fault::TorqueLimit);
         assert_eq!(controller.state().fault, Some(Fault::TorqueLimit));
+    }
+
+    #[test]
+    fn valid_commands_do_not_clear_latched_faults() {
+        let mut controller = Controller::new(LIMITS);
+        controller
+            .apply(MotorCommand {
+                torque_nm: 2.5,
+                mode: ControlMode::Torque,
+                ..MotorCommand::default()
+            })
+            .unwrap_err();
+
+        let fault = controller
+            .apply(MotorCommand {
+                mode: ControlMode::Disabled,
+                ..MotorCommand::default()
+            })
+            .unwrap_err();
+
+        assert_eq!(fault, Fault::TorqueLimit);
+        assert_eq!(controller.state().fault, Some(Fault::TorqueLimit));
+    }
+
+    #[test]
+    fn clear_faults_mode_explicitly_clears_latched_faults() {
+        let mut controller = Controller::new(LIMITS);
+        controller
+            .apply(MotorCommand {
+                torque_nm: 2.5,
+                mode: ControlMode::Torque,
+                ..MotorCommand::default()
+            })
+            .unwrap_err();
+
+        let state = controller
+            .apply(MotorCommand {
+                torque_nm: f32::NAN,
+                mode: ControlMode::ClearFaults,
+                ..MotorCommand::default()
+            })
+            .unwrap();
+
+        assert_eq!(state, MotorState::default());
+        assert_eq!(controller.state().fault, None);
     }
 }

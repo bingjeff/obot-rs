@@ -35,4 +35,10 @@ cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink-detail
 
 The detailed view is useful when a max value is higher than the current steady-state path; it exposes whether the latest sample is near the max or whether the max is a historical tail event.
 
+To clear a latched controller fault through the debug command packet, use the explicit clear-faults mode:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-command-jlink --packet-address 0x20000071 --sequence-address 0x2000009e --sequence 1 --mode clear-faults
+```
+
 This is an interim debug readout path. The longer-term compatibility target is still the existing USB/text API used by `motor_util --run-stats`.

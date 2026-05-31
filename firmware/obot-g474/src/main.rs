@@ -277,7 +277,11 @@ fn controller_storage_mut() -> &'static mut Controller {
 fn apply_host_command(controller: &mut Controller, command: obot_core::MotorCommand) -> bool {
     let mode = command.mode;
     let command_accepted = controller.apply(command).is_ok();
-    let command_allows_output = command_accepted && mode != ControlMode::Disabled;
+    let command_allows_output = command_accepted
+        && matches!(
+            mode,
+            ControlMode::Torque | ControlMode::Velocity | ControlMode::Position
+        );
     core::hint::black_box((command_accepted, command_allows_output));
     command_allows_output
 }
