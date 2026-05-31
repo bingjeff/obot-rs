@@ -208,11 +208,11 @@ impl FocController {
         self.pi_q.initialize();
     }
 
-    pub const fn status(&self) -> FocStatus {
-        self.status
+    pub const fn status(&self) -> &FocStatus {
+        &self.status
     }
 
-    pub fn step_with_sincos(&mut self, command: FocCommand, sin_t: f32, cos_t: f32) -> FocStatus {
+    pub fn step_with_sincos(&mut self, command: &FocCommand, sin_t: f32, cos_t: f32) -> &FocStatus {
         let currents = command.measured.currents;
         let i_alpha = TWO_THIRDS * currents.phase_a
             + NEG_ONE_THIRD * currents.phase_b
@@ -249,7 +249,7 @@ impl FocController {
                 v_q,
             },
         };
-        self.status
+        &self.status
     }
 }
 
@@ -302,8 +302,8 @@ mod tests {
         let mut foc = FocController::new(FocParam::MOTOR_HALL, DT_50_KHZ);
         foc.voltage_mode();
 
-        let status = foc.step_with_sincos(
-            FocCommand {
+        let status = *foc.step_with_sincos(
+            &FocCommand {
                 measured: FocMeasured {
                     currents: PhaseCurrents {
                         phase_a: 1.0,
@@ -328,8 +328,8 @@ mod tests {
         let mut foc = FocController::new(FocParam::MOTOR_HALL, DT_50_KHZ);
         foc.current_mode();
 
-        let status = foc.step_with_sincos(
-            FocCommand {
+        let status = *foc.step_with_sincos(
+            &FocCommand {
                 measured: FocMeasured {
                     currents: PhaseCurrents {
                         phase_a: 1.0,

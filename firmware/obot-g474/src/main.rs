@@ -96,17 +96,14 @@ fn firmware_main() -> ! {
                 pwm.write_zero_voltage();
                 core::hint::black_box(hall.read_count());
                 let currents = current_calibration.convert(current_adc.read_samples());
-                let foc_status = foc.step_with_sincos(
-                    FocCommand {
-                        desired: FocDesired::default(),
-                        measured: FocMeasured {
-                            currents,
-                            motor_electrical_angle: 0.0,
-                        },
+                let foc_command = FocCommand {
+                    desired: FocDesired::default(),
+                    measured: FocMeasured {
+                        currents,
+                        motor_electrical_angle: 0.0,
                     },
-                    0.0,
-                    1.0,
-                );
+                };
+                let foc_status = foc.step_with_sincos(&foc_command, 0.0, 1.0);
                 core::hint::black_box(foc_status);
                 core::hint::black_box(controller.state());
             });
