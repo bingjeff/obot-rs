@@ -3,6 +3,8 @@
 #![cfg_attr(target_os = "none", allow(dead_code))]
 
 #[cfg(target_os = "none")]
+mod clock;
+#[cfg(target_os = "none")]
 mod debug_report;
 #[cfg(target_os = "none")]
 mod startup;
@@ -50,6 +52,12 @@ fn firmware_main() -> ! {
     let mut fast_benchmark = LoopBenchmark::new();
     let mut main_benchmark = LoopBenchmark::new();
     let mut benchmark_sequence = 0;
+    if clock::configure_170mhz_hsi().is_err() {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     let cycle_counter = DwtCycleCounter::new();
     cycle_counter.enable();
 
