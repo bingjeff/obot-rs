@@ -33,14 +33,17 @@ impl HallInputs {
         }
     }
 
+    #[inline(always)]
     pub fn read_count(&mut self) -> i32 {
         self.read_sample().count
     }
 
+    #[inline(always)]
     pub fn read_sample(&mut self) -> HallSample {
         self.encoder.read_sample(self.raw_bits())
     }
 
+    #[inline(always)]
     pub fn raw_bits(&self) -> u8 {
         (read(GPIO_IDR) & HALL_PIN_MASK) as u8
     }

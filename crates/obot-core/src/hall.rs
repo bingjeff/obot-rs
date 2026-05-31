@@ -115,10 +115,12 @@ impl HallEncoder {
         }
     }
 
+    #[inline(always)]
     pub fn read(&mut self, hall_bits: u8) -> i32 {
         self.read_sample(hall_bits).count
     }
 
+    #[inline(always)]
     pub fn read_sample(&mut self, hall_bits: u8) -> HallSample {
         let hall_count = HALL_TABLE[(hall_bits & 0x07) as usize];
         if hall_count != 0 {
