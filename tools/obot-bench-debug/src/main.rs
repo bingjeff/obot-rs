@@ -7,7 +7,7 @@ use std::{
 use obot_core::{ControlMode, MotorCommand};
 use obot_protocol::{
     BENCHMARK_PACKET_LEN, BenchmarkPacket, CommandPacket, DRIVER_REPORT_PACKET_LEN, DriverCommand,
-    DriverCommandPacket, DriverReportPacket,
+    DriverCommandPacket, DriverReportPacket, OUTPUT_SAFETY_PACKET_LEN, OutputSafetyPacket,
     STATUS_PACKET_LEN, StatusPacket,
 };
 
@@ -17,6 +17,7 @@ const DEFAULT_ADDRESS: u32 = 0x2000_0000;
 const DEFAULT_SPEED_KHZ: u32 = 4_000;
 const DEFAULT_ELF_PATH: &str = "target/thumbv7em-none-eabihf/release/obot-g474";
 const BENCHMARK_PACKET_SYMBOL: &str = "OBOT_BENCHMARK_PACKET";
+const OUTPUT_SAFETY_PACKET_SYMBOL: &str = "OBOT_OUTPUT_SAFETY_PACKET";
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -44,11 +45,13 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "decode-detail-file" => decode_detail_file_command(rest),
         "decode-status-hex" => decode_status_hex_command(rest),
         "decode-driver-hex" => decode_driver_hex_command(rest),
+        "decode-output-safety-hex" => decode_output_safety_hex_command(rest),
         "read-jlink" => read_jlink_command(rest),
         "read-jlink-detail" => read_jlink_detail_command(rest),
         "run-stats-jlink" => run_stats_jlink_command(rest),
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
+        "read-output-safety-jlink" => read_output_safety_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
         "write-driver-command-jlink" => write_driver_command_jlink_command(rest),
         "jlink-script" => jlink_script_command(rest),
@@ -117,6 +120,15 @@ fn decode_driver_hex_command(args: &[String]) -> Result<String, String> {
     decode_driver_csv(&bytes)
 }
 
+fn decode_output_safety_hex_command(args: &[String]) -> Result<String, String> {
+    if args.is_empty() {
+        return Err("decode-output-safety-hex requires packet bytes".to_string());
+    }
+
+    let bytes = parse_hex_bytes(&args.join(" "))?;
+    decode_output_safety_csv(&bytes)
+}
+
 fn read_jlink_command(args: &[String]) -> Result<String, String> {
     let options = JlinkOptions::parse(args)?;
     let bytes = read_jlink_bytes(&options, BENCHMARK_PACKET_LEN)?;
@@ -146,6 +158,13 @@ fn read_driver_jlink_command(args: &[String]) -> Result<String, String> {
     let options = JlinkOptions::parse(args)?;
     let bytes = read_jlink_bytes(&options, DRIVER_REPORT_PACKET_LEN)?;
     decode_driver_csv(&bytes)
+}
+
+fn read_output_safety_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = SymbolReadOptions::parse(args)?;
+    let jlink = options.resolve(OUTPUT_SAFETY_PACKET_SYMBOL)?;
+    let bytes = read_jlink_bytes(&jlink, OUTPUT_SAFETY_PACKET_LEN)?;
+    decode_output_safety_csv(&bytes)
 }
 
 fn read_jlink_bytes(options: &JlinkOptions, len: usize) -> Result<Vec<u8>, String> {
@@ -764,6 +783,11 @@ fn decode_driver_csv(bytes: &[u8]) -> Result<String, String> {
     Ok(format_driver_csv(DEFAULT_NAME, packet))
 }
 
+fn decode_output_safety_csv(bytes: &[u8]) -> Result<String, String> {
+    let packet = decode_output_safety_packet(bytes)?;
+    Ok(format_output_safety_csv(DEFAULT_NAME, packet))
+}
+
 fn decode_status_packet(bytes: &[u8]) -> Result<StatusPacket, String> {
     if bytes.len() != STATUS_PACKET_LEN {
         return Err(format!(
@@ -788,6 +812,18 @@ fn decode_driver_report_packet(bytes: &[u8]) -> Result<DriverReportPacket, Strin
     DriverReportPacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
 }
 
+fn decode_output_safety_packet(bytes: &[u8]) -> Result<OutputSafetyPacket, String> {
+    if bytes.len() != OUTPUT_SAFETY_PACKET_LEN {
+        return Err(format!(
+            "expected {} output safety bytes, got {}",
+            OUTPUT_SAFETY_PACKET_LEN,
+            bytes.len()
+        ));
+    }
+
+    OutputSafetyPacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
+}
+
 fn format_status_csv(name: &str, packet: StatusPacket) -> String {
     format!(
         "name, sequence, fault, torque_nm, velocity_rad_s, position_rad\n{}, {}, {}, {}, {}, {}\n",
@@ -810,6 +846,21 @@ fn format_driver_csv(name: &str, packet: DriverReportPacket) -> String {
         packet.transfer_error_mask,
         packet.status_before,
         packet.status_after,
+    )
+}
+
+fn format_output_safety_csv(name: &str, packet: OutputSafetyPacket) -> String {
+    let status = packet.status;
+    format!(
+        "name, sequence, output_allowed, command_blocked, bus_blocked, driver_not_enabled, driver_fault_latched, controller_faulted\n{}, {}, {}, {}, {}, {}, {}, {}\n",
+        name,
+        packet.sequence,
+        status.output_allowed,
+        status.command_blocked,
+        status.bus_blocked,
+        status.driver_not_enabled,
+        status.driver_fault_latched,
+        status.controller_faulted,
     )
 }
 
@@ -957,12 +1008,14 @@ fn usage() -> String {
   obot-bench-debug decode-detail-file <path-to-raw-{}-byte-benchmark-packet>
   obot-bench-debug decode-status-hex <{} status bytes as hex>
   obot-bench-debug decode-driver-hex <{} driver report bytes as hex>
+  obot-bench-debug decode-output-safety-hex <{} output safety bytes as hex>
   obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-status-jlink --address <status-packet-address> [--speed 4000]
   obot-bench-debug read-driver-jlink --address <driver-report-address> [--speed 4000]
+  obot-bench-debug read-output-safety-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <output-safety-address>] [--speed 4000]
   obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position|clear-faults] [--torque Nm] [--velocity rad_s] [--position rad]
   obot-bench-debug write-driver-command-jlink --packet-address <driver-command-packet-address> --sequence-address <driver-command-sequence-address> [--sequence N] [--command disable|configure-enable]
 ",
@@ -971,7 +1024,8 @@ fn usage() -> String {
         BENCHMARK_PACKET_LEN,
         BENCHMARK_PACKET_LEN,
         STATUS_PACKET_LEN,
-        DRIVER_REPORT_PACKET_LEN
+        DRIVER_REPORT_PACKET_LEN,
+        OUTPUT_SAFETY_PACKET_LEN
     )
 }
 
@@ -1165,6 +1219,29 @@ mod tests {
         assert_eq!(
             output,
             "name, sequence, configured, verify_error_mask, transfer_error_mask, status_before, status_after\nrust, 4, false, 0x0012, 0x0040, 0xAABBCCDD, 0x11223344\n"
+        );
+    }
+
+    #[test]
+    fn formats_output_safety_csv() {
+        let output = format_output_safety_csv(
+            "rust",
+            OutputSafetyPacket {
+                sequence: 5,
+                status: obot_core::output::OutputSafetyStatus {
+                    output_allowed: false,
+                    command_blocked: true,
+                    bus_blocked: true,
+                    driver_not_enabled: true,
+                    driver_fault_latched: false,
+                    controller_faulted: true,
+                },
+            },
+        );
+
+        assert_eq!(
+            output,
+            "name, sequence, output_allowed, command_blocked, bus_blocked, driver_not_enabled, driver_fault_latched, controller_faulted\nrust, 5, false, true, true, true, false, true\n"
         );
     }
 

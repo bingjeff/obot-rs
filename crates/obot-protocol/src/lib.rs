@@ -3,12 +3,14 @@
 use obot_core::{
     ControlMode, Fault, MotorCommand, MotorState,
     benchmark::{BenchmarkReport, CycleStatsSnapshot, LoopBenchmarkSnapshot},
+    output::OutputSafetyStatus,
 };
 
 pub const COMMAND_PACKET_LEN: usize = 14;
 pub const DRIVER_COMMAND_PACKET_LEN: usize = 2;
 pub const STATUS_PACKET_LEN: usize = 14;
 pub const DRIVER_REPORT_PACKET_LEN: usize = 14;
+pub const OUTPUT_SAFETY_PACKET_LEN: usize = 2;
 pub const BENCHMARK_PACKET_LEN: usize = 81;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,6 +19,7 @@ pub enum DecodeError {
     InvalidMode,
     InvalidFault,
     InvalidDriverCommand,
+    InvalidOutputSafetyFlags,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -150,6 +153,28 @@ impl DriverReportPacket {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputSafetyPacket {
+    pub sequence: u8,
+    pub status: OutputSafetyStatus,
+}
+
+impl OutputSafetyPacket {
+    pub fn encode(self) -> [u8; OUTPUT_SAFETY_PACKET_LEN] {
+        [self.sequence, output_safety_flags_to_u8(self.status)]
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let bytes: &[u8; OUTPUT_SAFETY_PACKET_LEN] =
+            input.try_into().map_err(|_| DecodeError::InvalidLength)?;
+
+        Ok(Self {
+            sequence: bytes[0],
+            status: output_safety_flags_from_u8(bytes[1])?,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BenchmarkPacket {
     pub sequence: u8,
@@ -273,6 +298,36 @@ const fn fault_from_u8(value: u8) -> Result<Option<Fault>, DecodeError> {
     }
 }
 
+const OUTPUT_SAFETY_KNOWN_FLAGS: u8 = 0x3f;
+
+const fn output_safety_flags_to_u8(status: OutputSafetyStatus) -> u8 {
+    bool_to_u8(status.output_allowed)
+        | (bool_to_u8(status.command_blocked) << 1)
+        | (bool_to_u8(status.bus_blocked) << 2)
+        | (bool_to_u8(status.driver_not_enabled) << 3)
+        | (bool_to_u8(status.driver_fault_latched) << 4)
+        | (bool_to_u8(status.controller_faulted) << 5)
+}
+
+const fn bool_to_u8(value: bool) -> u8 {
+    if value { 1 } else { 0 }
+}
+
+const fn output_safety_flags_from_u8(value: u8) -> Result<OutputSafetyStatus, DecodeError> {
+    if value & !OUTPUT_SAFETY_KNOWN_FLAGS != 0 {
+        return Err(DecodeError::InvalidOutputSafetyFlags);
+    }
+
+    Ok(OutputSafetyStatus {
+        output_allowed: value & (1 << 0) != 0,
+        command_blocked: value & (1 << 1) != 0,
+        bus_blocked: value & (1 << 2) != 0,
+        driver_not_enabled: value & (1 << 3) != 0,
+        driver_fault_latched: value & (1 << 4) != 0,
+        controller_faulted: value & (1 << 5) != 0,
+    })
+}
+
 const fn driver_command_to_u8(command: DriverCommand) -> u8 {
     match command {
         DriverCommand::Disable => 0,
@@ -367,6 +422,33 @@ mod tests {
         assert_eq!(
             DriverReportPacket::decode(&packet.encode()).unwrap(),
             packet
+        );
+    }
+
+    #[test]
+    fn output_safety_packet_round_trips() {
+        let packet = OutputSafetyPacket {
+            sequence: 12,
+            status: OutputSafetyStatus {
+                output_allowed: true,
+                command_blocked: false,
+                bus_blocked: true,
+                driver_not_enabled: true,
+                driver_fault_latched: false,
+                controller_faulted: true,
+            },
+        };
+        let encoded = packet.encode();
+
+        assert_eq!(encoded, [12, 0b0010_1101]);
+        assert_eq!(OutputSafetyPacket::decode(&encoded).unwrap(), packet);
+    }
+
+    #[test]
+    fn rejects_unknown_output_safety_flags() {
+        assert_eq!(
+            OutputSafetyPacket::decode(&[0, 0x40]).unwrap_err(),
+            DecodeError::InvalidOutputSafetyFlags
         );
     }
 

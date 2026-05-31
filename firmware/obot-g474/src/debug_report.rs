@@ -3,7 +3,7 @@ use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use obot_protocol::{
     BENCHMARK_PACKET_LEN, BenchmarkPacket, COMMAND_PACKET_LEN, CommandPacket,
     DRIVER_COMMAND_PACKET_LEN, DRIVER_REPORT_PACKET_LEN, DriverCommandPacket, DriverReportPacket,
-    STATUS_PACKET_LEN, StatusPacket,
+    OUTPUT_SAFETY_PACKET_LEN, OutputSafetyPacket, STATUS_PACKET_LEN, StatusPacket,
 };
 
 #[unsafe(no_mangle)]
@@ -47,6 +47,15 @@ pub static mut OBOT_DRIVER_REPORT_PACKET: [u8; DRIVER_REPORT_PACKET_LEN] =
 #[unsafe(no_mangle)]
 #[used]
 pub static mut OBOT_DRIVER_REPORT_PACKET_SEQUENCE: u8 = 0;
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_OUTPUT_SAFETY_PACKET: [u8; OUTPUT_SAFETY_PACKET_LEN] =
+    [0; OUTPUT_SAFETY_PACKET_LEN];
+
+#[unsafe(no_mangle)]
+#[used]
+pub static mut OBOT_OUTPUT_SAFETY_PACKET_SEQUENCE: u8 = 0;
 
 pub fn publish(packet: BenchmarkPacket) {
     let encoded = packet.encode();
@@ -151,6 +160,24 @@ pub fn publish_driver_report(packet: DriverReportPacket) {
     }
 }
 
+pub fn publish_output_safety(packet: OutputSafetyPacket) {
+    let encoded = packet.encode();
+    let dest = addr_of_mut!(OBOT_OUTPUT_SAFETY_PACKET).cast::<u8>();
+
+    for (offset, byte) in encoded.iter().copied().enumerate() {
+        // SAFETY: `dest` points to the exported output-safety packet storage.
+        unsafe { write_volatile(dest.add(offset), byte) };
+    }
+
+    // SAFETY: This writes the exported sequence byte after the packet bytes.
+    unsafe {
+        write_volatile(
+            addr_of_mut!(OBOT_OUTPUT_SAFETY_PACKET_SEQUENCE),
+            packet.sequence,
+        );
+    }
+}
+
 pub fn packet_ptr() -> *const u8 {
     addr_of!(OBOT_BENCHMARK_PACKET).cast::<u8>()
 }
@@ -189,4 +216,12 @@ pub fn driver_report_packet_ptr() -> *const u8 {
 
 pub const fn driver_report_packet_len() -> usize {
     DRIVER_REPORT_PACKET_LEN
+}
+
+pub fn output_safety_packet_ptr() -> *const u8 {
+    addr_of!(OBOT_OUTPUT_SAFETY_PACKET).cast::<u8>()
+}
+
+pub const fn output_safety_packet_len() -> usize {
+    OUTPUT_SAFETY_PACKET_LEN
 }

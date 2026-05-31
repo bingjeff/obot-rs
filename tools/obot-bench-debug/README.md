@@ -35,6 +35,12 @@ cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink-detail
 
 The detailed view is useful when a max value is higher than the current steady-state path; it exposes whether the latest sample is near the max or whether the max is a historical tail event.
 
+To inspect why outputs are blocked or allowed, read the output-safety packet through the built ELF symbol table:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-output-safety-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474
+```
+
 To clear a latched controller fault through the debug command packet, use the explicit clear-faults mode:
 
 ```sh

@@ -26,7 +26,7 @@ use obot_core::{
     current::CurrentCalibration,
     foc::{FocCommand, FocController, FocDesired, FocMeasured, FocParam},
     hall::HallElectricalAngle,
-    output::{OutputSafety, OutputSafetyInputs},
+    output::{OutputSafety, OutputSafetyInputs, OutputSafetyStatus},
     power::OutputGate,
 };
 #[cfg(target_os = "none")]
@@ -42,7 +42,9 @@ use obot_g474::hall::HallInputs;
 #[cfg(target_os = "none")]
 use obot_g474::pwm::SafeZeroPwm;
 #[cfg(target_os = "none")]
-use obot_protocol::{BenchmarkPacket, DriverCommand, DriverReportPacket, StatusPacket};
+use obot_protocol::{
+    BenchmarkPacket, DriverCommand, DriverReportPacket, OutputSafetyPacket, StatusPacket,
+};
 
 #[cfg(target_os = "none")]
 const FAST_LOOP_DT_S: f32 = 1.0 / 50_000.0;
@@ -80,6 +82,7 @@ fn firmware_main() -> ! {
     let mut command_sequence = 0;
     let mut driver_command_sequence = 0;
     let mut driver_report_sequence = 0;
+    let mut output_safety_sequence = 0;
     if clock::configure_170mhz_hsi().is_err() {
         loop {
             core::hint::spin_loop();
@@ -146,13 +149,16 @@ fn firmware_main() -> ! {
                     &mut driver_report_sequence,
                 );
                 bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
-                output_allowed = update_output_safety(
+                let output_safety_status = update_output_safety(
                     &driver,
                     command_allows_output,
                     output_gate.allows_output_raw(bus_voltage_raw),
                     controller_faulted,
                     clear_output_safety_faults,
                 );
+                output_allowed = output_safety_status.output_allowed;
+                output_safety_sequence =
+                    publish_output_safety_report(output_safety_sequence, output_safety_status);
                 core::hint::black_box((
                     command_allows_output,
                     controller_faulted,
@@ -325,6 +331,16 @@ fn publish_status_report(sequence: u8, state: obot_core::MotorState) {
 }
 
 #[cfg(target_os = "none")]
+fn publish_output_safety_report(sequence: u8, status: OutputSafetyStatus) -> u8 {
+    debug_report::publish_output_safety(OutputSafetyPacket { sequence, status });
+    core::hint::black_box((
+        debug_report::output_safety_packet_ptr(),
+        debug_report::output_safety_packet_len(),
+    ));
+    sequence.wrapping_add(1)
+}
+
+#[cfg(target_os = "none")]
 #[inline(never)]
 fn update_output_safety(
     driver: &MotorDriverPins,
@@ -332,7 +348,7 @@ fn update_output_safety(
     bus_allows_output: bool,
     controller_faulted: bool,
     clear_latched_faults: bool,
-) -> bool {
+) -> OutputSafetyStatus {
     let safety = output_safety_storage_mut();
     if clear_latched_faults {
         safety.clear_latched_driver_fault();
@@ -347,7 +363,7 @@ fn update_output_safety(
         controller_faulted,
     });
     core::hint::black_box(status);
-    status.output_allowed
+    status
 }
 
 #[cfg(target_os = "none")]
