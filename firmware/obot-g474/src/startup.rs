@@ -1,6 +1,8 @@
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 
 const INITIAL_STACK: usize = 0x2000_0000 + 96 * 1024;
+const SCB_CPACR: usize = 0xE000_ED88;
+const FPU_CP10_CP11_FULL_ACCESS: u32 = (0b11 << 20) | (0b11 << 22);
 
 #[repr(C)]
 struct VectorTable {
@@ -25,8 +27,20 @@ static VECTOR_TABLE: VectorTable = VectorTable {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn Reset() -> ! {
+    enable_fpu();
     init_memory();
     super::firmware_main();
+}
+
+fn enable_fpu() {
+    let cpacr = SCB_CPACR as *mut u32;
+    // SAFETY: CPACR is the ARMv7-M System Control Block register that enables
+    // coprocessor access. This runs at reset before any floating-point code.
+    unsafe {
+        let value = read_volatile(cpacr);
+        write_volatile(cpacr, value | FPU_CP10_CP11_FULL_ACCESS);
+        core::arch::asm!("dsb", "isb", options(nomem, nostack, preserves_flags));
+    }
 }
 
 fn init_memory() {
