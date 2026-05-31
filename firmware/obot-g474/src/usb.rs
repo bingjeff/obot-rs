@@ -1,3 +1,4 @@
+use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
@@ -16,6 +17,16 @@ const GPIOA_BASE: usize = 0x4800_0000;
 const GPIO_MODER: usize = GPIOA_BASE;
 const GPIO_OSPEEDR: usize = GPIOA_BASE + 0x08;
 const GPIO_PUPDR: usize = GPIOA_BASE + 0x0C;
+
+const UID_BASE: usize = 0x1FFF_7590;
+const UID_WORD0: usize = UID_BASE;
+const UID_WORD1: usize = UID_BASE + 4;
+const UID_WORD2: usize = UID_BASE + 8;
+
+const NVIC_ISER0: usize = 0xE000_E100;
+const NVIC_IPR_BASE: usize = 0xE000_E400;
+const USB_LP_IRQ: u8 = 20;
+const USB_LP_IRQ_PRIORITY: u8 = 0x80;
 
 const USB_BASE: usize = 0x4000_5C00;
 const USB_EP0R: usize = USB_BASE;
@@ -95,13 +106,27 @@ const USB_COUNT_RX_COUNT_MASK: u16 = 0x03FF;
 const USB_COUNT_RX_96_BYTES: u16 = (1 << 15) | (2 << 10);
 const NO_PENDING_ADDRESS: u8 = 0xFF;
 
-const SERIAL_STRING: &str = "000000000000";
-const CONFIGURATION_STRING: &str = "rust firmware";
+const CONFIGURATION_STRING: &str = "obot-rs rust firmware";
 const INTERFACE_STRING: &str = "rust_debug";
+
+struct TextRxStorage(UnsafeCell<[u8; usb_control::BULK_MAX_PACKET_SIZE as usize]>);
+
+unsafe impl Sync for TextRxStorage {}
 
 static USB_LP_INTERRUPT_COUNT: AtomicU32 = AtomicU32::new(0);
 static USB_ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
 static PENDING_ADDRESS: AtomicU8 = AtomicU8::new(NO_PENDING_ADDRESS);
+static TEXT_RX_LEN: AtomicU8 = AtomicU8::new(0);
+static TEXT_RX_LAST_LEN: AtomicU8 = AtomicU8::new(0);
+static TEXT_TX_LAST_LEN: AtomicU8 = AtomicU8::new(0);
+static TEXT_RX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TEXT_RX_DROPPED: AtomicU32 = AtomicU32::new(0);
+static TEXT_POLL_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TEXT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TEXT_TX_BUSY: AtomicU32 = AtomicU32::new(0);
+static TEXT_RX_BUFFER: TextRxStorage = TextRxStorage(UnsafeCell::new(
+    [0; usb_control::BULK_MAX_PACKET_SIZE as usize],
+));
 
 pub struct UsbDevice;
 
@@ -113,6 +138,11 @@ impl UsbDevice {
         reset_usb();
         configure_usb_disconnected();
         Self
+    }
+
+    pub fn connect(&self) {
+        enable_usb_lp_interrupt();
+        modify16(USB_BCDR, |value| value | USB_BCDR_DPPU);
     }
 }
 
@@ -141,6 +171,65 @@ pub fn interrupt_count() -> u32 {
 
 pub fn error_count() -> u32 {
     USB_ERROR_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn text_rx_total() -> u32 {
+    TEXT_RX_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn text_rx_dropped() -> u32 {
+    TEXT_RX_DROPPED.load(Ordering::Relaxed)
+}
+
+pub fn text_poll_total() -> u32 {
+    TEXT_POLL_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn text_tx_total() -> u32 {
+    TEXT_TX_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn text_tx_busy() -> u32 {
+    TEXT_TX_BUSY.load(Ordering::Relaxed)
+}
+
+pub fn text_rx_last_len() -> u8 {
+    TEXT_RX_LAST_LEN.load(Ordering::Relaxed)
+}
+
+pub fn text_tx_last_len() -> u8 {
+    TEXT_TX_LAST_LEN.load(Ordering::Relaxed)
+}
+
+pub fn poll_text_api_request(
+    output: &mut [u8; usb_control::BULK_MAX_PACKET_SIZE as usize],
+) -> Option<usize> {
+    let len = TEXT_RX_LEN.load(Ordering::Acquire);
+    if len == 0 {
+        return None;
+    }
+
+    let len = len as usize;
+    unsafe {
+        let input = &*TEXT_RX_BUFFER.0.get();
+        output[..len].copy_from_slice(&input[..len]);
+    }
+    TEXT_RX_LEN.store(0, Ordering::Release);
+    TEXT_POLL_TOTAL.fetch_add(1, Ordering::Relaxed);
+    endpoint_set_toggle(1, USB_EP_RX_VALID, USB_EPRX_STAT);
+    Some(len)
+}
+
+pub fn send_text_api_response(data: &[u8]) -> bool {
+    if tx_active(1) {
+        TEXT_TX_BUSY.fetch_add(1, Ordering::Relaxed);
+        set_tx_nak(1);
+    }
+
+    send_data(1, data);
+    TEXT_TX_LAST_LEN.store(data.len() as u8, Ordering::Relaxed);
+    TEXT_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
+    true
 }
 
 fn enable_gpioa_clock() {
@@ -198,10 +287,15 @@ fn handle_reset() {
 
 fn handle_correct_transfer() {
     let istr = read16(USB_ISTR);
-    if istr & USB_ISTR_EP_ID != 0 {
-        return;
+    match (istr & USB_ISTR_EP_ID) as u8 {
+        0 => handle_control_endpoint_transfer(istr),
+        1 => handle_text_endpoint_transfer(istr),
+        2 => handle_realtime_endpoint_transfer(istr),
+        _ => {}
     }
+}
 
+fn handle_control_endpoint_transfer(istr: u16) {
     if istr & USB_ISTR_DIR != 0 {
         if read16(endpoint_register(0)) & USB_EP_SETUP != 0 {
             handle_ep0_setup();
@@ -213,6 +307,45 @@ fn handle_correct_transfer() {
     if read16(endpoint_register(0)) & USB_EP_CTR_TX != 0 {
         apply_pending_address();
         clear_endpoint_ctr_tx(0);
+    }
+}
+
+fn handle_text_endpoint_transfer(istr: u16) {
+    if istr & USB_ISTR_DIR != 0 {
+        clear_endpoint_ctr_rx(1);
+        let byte_count = read_btable(1, BTABLE_COUNT_RX) & USB_COUNT_RX_COUNT_MASK;
+        if TEXT_RX_LEN.load(Ordering::Acquire) == 0 {
+            let len = core::cmp::min(
+                byte_count as usize,
+                usb_control::BULK_MAX_PACKET_SIZE as usize,
+            );
+            unsafe {
+                let output = &mut *TEXT_RX_BUFFER.0.get();
+                read_pma_bytes(EP1_RX_OFFSET, &mut output[..len], len);
+            }
+            TEXT_RX_LAST_LEN.store(len as u8, Ordering::Relaxed);
+            TEXT_RX_TOTAL.fetch_add(1, Ordering::Relaxed);
+            TEXT_RX_LEN.store(len as u8, Ordering::Release);
+        } else {
+            TEXT_RX_DROPPED.fetch_add(1, Ordering::Relaxed);
+        }
+        endpoint_set_toggle(1, USB_EP_RX_VALID, USB_EPRX_STAT);
+    }
+
+    if read16(endpoint_register(1)) & USB_EP_CTR_TX != 0 {
+        clear_endpoint_ctr_tx(1);
+        set_tx_nak(1);
+    }
+}
+
+fn handle_realtime_endpoint_transfer(istr: u16) {
+    if istr & USB_ISTR_DIR != 0 {
+        clear_endpoint_ctr_rx(2);
+        endpoint_set_toggle(2, USB_EP_RX_VALID, USB_EPRX_STAT);
+    }
+
+    if read16(endpoint_register(2)) & USB_EP_CTR_TX != 0 {
+        clear_endpoint_ctr_tx(2);
     }
 }
 
@@ -247,12 +380,11 @@ fn handle_ep0_setup() {
 }
 
 fn send_control_response(setup: SetupPacket, request: ControlRequest) {
-    let Ok(response) = usb_control::control_response(
-        request,
-        SERIAL_STRING,
-        CONFIGURATION_STRING,
-        INTERFACE_STRING,
-    ) else {
+    let mut serial_buffer = [0; 16];
+    let serial = serial_string(&mut serial_buffer);
+    let Ok(response) =
+        usb_control::control_response(request, serial, CONFIGURATION_STRING, INTERFACE_STRING)
+    else {
         send_stall(0);
         return;
     };
@@ -295,8 +427,16 @@ fn send_data(endpoint: u8, data: &[u8]) {
     endpoint_set_toggle(endpoint, USB_EP_TX_VALID, USB_EPTX_STAT);
 }
 
+fn tx_active(endpoint: u8) -> bool {
+    read16(endpoint_register(endpoint)) & USB_EPTX_STAT == USB_EP_TX_VALID
+}
+
 fn send_stall(endpoint: u8) {
     endpoint_set_toggle(endpoint, USB_EP_TX_STALL, USB_EPTX_STAT);
+}
+
+fn set_tx_nak(endpoint: u8) {
+    endpoint_set_toggle(endpoint, USB_EP_TX_NAK, USB_EPTX_STAT);
 }
 
 fn apply_pending_address() {
@@ -381,6 +521,64 @@ fn read_pma16(offset: usize) -> u16 {
     read16(USB_PMA_BASE + offset)
 }
 
+fn enable_usb_lp_interrupt() {
+    write8(NVIC_IPR_BASE + USB_LP_IRQ as usize, USB_LP_IRQ_PRIORITY);
+    write32(NVIC_ISER0, 1 << USB_LP_IRQ);
+}
+
+fn serial_string(buffer: &mut [u8; 16]) -> &str {
+    let serial0 = read32(UID_WORD0).wrapping_add(read32(UID_WORD2));
+    let serial1 = (read32(UID_WORD1) >> 16) as u16;
+    let mut len = append_hex_u32(buffer, 0, serial0);
+    len = append_hex_u16(buffer, len, serial1);
+    core::str::from_utf8(&buffer[..len]).unwrap_or("000000000000")
+}
+
+fn append_hex_u32(buffer: &mut [u8], mut len: usize, value: u32) -> usize {
+    if value == 0 {
+        buffer[len] = b'0';
+        return len + 1;
+    }
+
+    let mut started = false;
+    for shift in (0..=28).rev().step_by(4) {
+        let digit = ((value >> shift) & 0xF) as u8;
+        if digit == 0 && !started {
+            continue;
+        }
+        started = true;
+        buffer[len] = hex_digit(digit);
+        len += 1;
+    }
+    len
+}
+
+fn append_hex_u16(buffer: &mut [u8], mut len: usize, value: u16) -> usize {
+    if value == 0 {
+        buffer[len] = b'0';
+        return len + 1;
+    }
+
+    let mut started = false;
+    for shift in (0..=12).rev().step_by(4) {
+        let digit = ((value >> shift) & 0xF) as u8;
+        if digit == 0 && !started {
+            continue;
+        }
+        started = true;
+        buffer[len] = hex_digit(digit);
+        len += 1;
+    }
+    len
+}
+
+fn hex_digit(digit: u8) -> u8 {
+    match digit {
+        0..=9 => b'0' + digit,
+        _ => b'A' + (digit - 10),
+    }
+}
+
 fn set_two_bit_field(value: u32, pin: u32, field: u32) -> u32 {
     let shift = pin * 2;
     (value & !(0b11 << shift)) | (field << shift)
@@ -408,6 +606,11 @@ fn read32(address: usize) -> u32 {
 fn write32(address: usize, value: u32) {
     // SAFETY: The caller passes STM32G474 memory-mapped register addresses.
     unsafe { write_volatile(address as *mut u32, value) };
+}
+
+fn write8(address: usize, value: u8) {
+    // SAFETY: The caller passes ARMv7-M memory-mapped register addresses.
+    unsafe { write_volatile(address as *mut u8, value) };
 }
 
 fn read16(address: usize) -> u16 {
