@@ -92,6 +92,7 @@ fn firmware_main() -> ! {
     let current_calibration = CurrentCalibration::MOTOR_HALL;
     let output_gate = OutputGate::MOTOR_HALL;
     let mut bus_voltage_raw = 0_u16;
+    let mut output_allowed = false;
     let hall_angle = HallElectricalAngle::MOTOR_HALL;
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
     foc.current_mode();
@@ -116,18 +117,10 @@ fn firmware_main() -> ! {
                 };
                 let foc_status =
                     foc.step_with_sincos(&foc_command, hall_sincos.sin, hall_sincos.cos);
-                let driver_status = driver.status();
-                let safety_status = output_safety.update(OutputSafetyInputs {
-                    command_allows_output: false,
-                    bus_allows_output: output_gate.allows_output_raw(bus_voltage_raw),
-                    driver_enabled: driver_status.enabled,
-                    driver_faulted: driver_status.faulted,
-                    controller_faulted: controller.state().fault.is_some(),
-                });
                 let pwm_compares = pwm.compares_from_voltages(foc_status.command);
                 core::hint::black_box(foc_status);
                 core::hint::black_box(pwm_compares);
-                core::hint::black_box(safety_status);
+                core::hint::black_box(output_allowed);
                 core::hint::black_box(controller.state());
             });
         }
@@ -135,6 +128,12 @@ fn firmware_main() -> ! {
         if poll.main {
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
                 bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
+                output_allowed = update_output_safety(
+                    &mut output_safety,
+                    &driver,
+                    output_gate.allows_output_raw(bus_voltage_raw),
+                    controller.state().fault.is_some(),
+                );
                 core::hint::black_box(controller.state());
             });
             benchmark_sequence = publish_benchmark_report(
@@ -147,6 +146,26 @@ fn firmware_main() -> ! {
             core::hint::spin_loop();
         }
     }
+}
+
+#[cfg(target_os = "none")]
+#[inline(never)]
+fn update_output_safety(
+    output_safety: &mut OutputSafety,
+    driver: &MotorDriverPins,
+    bus_allows_output: bool,
+    controller_faulted: bool,
+) -> bool {
+    let driver_status = driver.status();
+    let status = output_safety.update(OutputSafetyInputs {
+        command_allows_output: false,
+        bus_allows_output,
+        driver_enabled: driver_status.enabled,
+        driver_faulted: driver_status.faulted,
+        controller_faulted,
+    });
+    core::hint::black_box(status);
+    status.output_allowed
 }
 
 #[cfg(target_os = "none")]
