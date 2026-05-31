@@ -968,6 +968,7 @@ struct UsbRunStatsOptions {
 #[derive(Clone, Debug, PartialEq)]
 struct AcceptedProofUsbOptions {
     device_path: Option<PathBuf>,
+    elf_path: Option<PathBuf>,
     expected_firmware_version: Option<String>,
     samples: usize,
     sequence: u8,
@@ -1195,6 +1196,7 @@ impl AcceptedProofUsbOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
             device_path: None,
+            elf_path: None,
             expected_firmware_version: None,
             samples: 100,
             sequence: 200,
@@ -1215,6 +1217,13 @@ impl AcceptedProofUsbOptions {
                         .get(index)
                         .ok_or_else(|| "--dev requires a value".to_string())?;
                     options.device_path = Some(PathBuf::from(path));
+                }
+                "--elf" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--elf requires a value".to_string())?;
+                    options.elf_path = Some(PathBuf::from(path));
                 }
                 "--samples" => {
                     index += 1;
@@ -1773,6 +1782,18 @@ fn read_usb_run_stats(options: &UsbRunStatsOptions) -> Result<UsbRunStats, Strin
 fn accepted_proof_usb(options: &AcceptedProofUsbOptions) -> Result<String, String> {
     let mut output = String::new();
 
+    if let Some(elf_path) = &options.elf_path {
+        let symbols = heap_allocator_symbols_in_elf(elf_path)?;
+        append_proof_section(
+            &mut output,
+            "static_no_heap",
+            &format_no_heap_csv(DEFAULT_NAME, elf_path, &symbols),
+        );
+        if !symbols.is_empty() {
+            return Err(command_failure(output));
+        }
+    }
+
     let firmware_version = read_text_api_usb(&TextApiUsbOptions {
         device_path: options.device_path.clone(),
         request: "firmware_version".to_string(),
@@ -1948,6 +1969,21 @@ fn format_firmware_identity_csv(name: &str, firmware_version: &str) -> String {
         "name, firmware_version\n{}, {}\n",
         name,
         firmware_version.trim()
+    )
+}
+
+fn format_no_heap_csv(name: &str, elf_path: &Path, symbols: &[String]) -> String {
+    let heap_symbols = if symbols.is_empty() {
+        "none".to_string()
+    } else {
+        symbols.join("|")
+    };
+    format!(
+        "name, elf, heap_allocator_symbols, check_passed\n{}, {}, {}, {}\n",
+        name,
+        elf_path.display(),
+        heap_symbols,
+        symbols.is_empty()
     )
 }
 
@@ -3873,7 +3909,7 @@ fn usage() -> String {
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
   obot-bench-debug compare-baseline-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
-  obot-bench-debug accepted-proof-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--expect-firmware-version VERSION] [--timeout-ms N] [--command-poll-timeout-ms N] [--command-poll-interval-ms N] [--driver-poll-timeout-ms N] [--driver-poll-interval-ms N]
+  obot-bench-debug accepted-proof-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--sequence N] [--expect-firmware-version VERSION] [--timeout-ms N] [--command-poll-timeout-ms N] [--command-poll-interval-ms N] [--driver-poll-timeout-ms N] [--driver-poll-interval-ms N]
   obot-bench-debug powered-ready-proof-usb [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--expect-firmware-version VERSION] [--timeout-ms N] [--poll-timeout-ms N] [--poll-interval-ms N]
   obot-bench-debug verify-no-heap [--elf target/thumbv7em-none-eabihf/release/obot-g474]
   obot-bench-debug read-status-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <status-packet-address>] [--speed 4000]
@@ -4472,11 +4508,30 @@ mod tests {
     }
 
     #[test]
+    fn formats_no_heap_csv() {
+        assert_eq!(
+            format_no_heap_csv("rust", Path::new("firmware.elf"), &[]),
+            "name, elf, heap_allocator_symbols, check_passed\nrust, firmware.elf, none, true\n"
+        );
+
+        assert_eq!(
+            format_no_heap_csv(
+                "rust",
+                Path::new("firmware.elf"),
+                &["__rust_alloc".to_string(), "__rust_dealloc".to_string()],
+            ),
+            "name, elf, heap_allocator_symbols, check_passed\nrust, firmware.elf, __rust_alloc|__rust_dealloc, false\n"
+        );
+    }
+
+    #[test]
     fn parses_accepted_proof_usb_options() {
         let options = AcceptedProofUsbOptions::parse(&[
             "64".to_string(),
             "--dev".to_string(),
             "/dev/bus/usb/001/043".to_string(),
+            "--elf".to_string(),
+            "target/thumbv7em-none-eabihf/release/obot-g474".to_string(),
             "--sequence".to_string(),
             "180".to_string(),
             "--timeout-ms".to_string(),
@@ -4499,6 +4554,10 @@ mod tests {
         assert_eq!(
             options.device_path,
             Some(PathBuf::from("/dev/bus/usb/001/043"))
+        );
+        assert_eq!(
+            options.elf_path,
+            Some(PathBuf::from("target/thumbv7em-none-eabihf/release/obot-g474"))
         );
         assert_eq!(options.expected_firmware_version, Some("741ffaf".to_string()));
         assert_eq!(options.samples, 64);
