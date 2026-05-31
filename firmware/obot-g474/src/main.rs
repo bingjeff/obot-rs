@@ -100,7 +100,6 @@ fn firmware_main() -> ! {
                 pwm.write_zero_voltage();
                 let hall_sample = hall.read_sample();
                 let hall_sincos = hall_angle.sincos_hall_count(hall_sample.hall_count);
-                let bus_voltage_raw = current_adc.read_bus_voltage_raw();
                 let currents = current_calibration.convert(current_adc.read_samples());
                 let foc_command = FocCommand {
                     desired: FocDesired::default(),
@@ -111,18 +110,17 @@ fn firmware_main() -> ! {
                 };
                 let foc_status =
                     foc.step_with_sincos(&foc_command, hall_sincos.sin, hall_sincos.cos);
-                let output_allowed = output_gate.allows_output_raw(bus_voltage_raw);
                 let pwm_compares = pwm.compares_from_voltages(foc_status.command);
-                core::hint::black_box(foc_status);
-                core::hint::black_box(pwm_compares);
-                core::hint::black_box(bus_voltage_raw);
-                core::hint::black_box(output_allowed);
+                core::hint::black_box((foc_status, pwm_compares));
                 core::hint::black_box(controller.state());
             });
         }
 
         if poll.main {
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
+                let bus_voltage_raw = current_adc.read_bus_voltage_raw();
+                let output_allowed = output_gate.allows_output_raw(bus_voltage_raw);
+                core::hint::black_box((bus_voltage_raw, output_allowed));
                 core::hint::black_box(controller.state());
             });
             benchmark_sequence = publish_benchmark_report(
