@@ -1,0 +1,16 @@
+[package]
+name = "obot-protocol"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+obot-core = { path = "../obot-core" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

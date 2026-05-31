@@ -1,0 +1,21 @@
+[package]
+name = "obot-g474"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+obot-core = { path = "../../crates/obot-core" }
+obot-protocol = { path = "../../crates/obot-protocol" }
+
+[[bin]]
+name = "obot-g474"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
+[lints]
+workspace = true

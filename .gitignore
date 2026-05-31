@@ -1,0 +1,10 @@
+/target/
+/.probe-rs/
+/.gdb_history
+*.elf
+*.bin
+*.hex
+*.uf2
+*.log
+*.d
+*.o
