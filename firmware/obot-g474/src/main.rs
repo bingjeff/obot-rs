@@ -113,7 +113,10 @@ fn firmware_main() -> ! {
                     foc.step_with_sincos(&foc_command, hall_sincos.sin, hall_sincos.cos);
                 let output_allowed = output_gate.allows_output_raw(bus_voltage_raw);
                 let pwm_compares = pwm.compares_from_voltages(foc_status.command);
-                core::hint::black_box((foc_status, bus_voltage_raw, output_allowed, pwm_compares));
+                core::hint::black_box(foc_status);
+                core::hint::black_box(pwm_compares);
+                core::hint::black_box(bus_voltage_raw);
+                core::hint::black_box(output_allowed);
                 core::hint::black_box(controller.state());
             });
         }
