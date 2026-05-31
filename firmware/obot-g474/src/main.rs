@@ -11,6 +11,7 @@ mod startup;
 
 #[cfg(target_os = "none")]
 use core::{
+    cell::UnsafeCell,
     panic::PanicInfo,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -69,7 +70,6 @@ fn main() {
 
 #[cfg(target_os = "none")]
 fn firmware_main() -> ! {
-    let mut controller = controller();
     let mut scheduler = scheduler();
     let mut fast_benchmark = LoopBenchmark::new();
     let mut main_benchmark = LoopBenchmark::new();
@@ -98,11 +98,11 @@ fn firmware_main() -> ! {
     let mut bus_voltage_raw = 0_u16;
     let mut output_allowed = false;
     let mut command_allows_output = false;
+    let mut controller_faulted = false;
     let hall_angle = HallElectricalAngle::MOTOR_HALL;
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
     foc.current_mode();
 
-    let _ = controller.state();
     core::hint::black_box(pwm.config());
 
     loop {
@@ -131,18 +131,17 @@ fn firmware_main() -> ! {
 
         if poll.main {
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
-                if let Some(packet) = debug_report::poll_command(&mut command_sequence) {
-                    command_allows_output = apply_host_command(&mut controller, packet.command);
-                }
+                (command_allows_output, controller_faulted) =
+                    service_host_debug(&mut command_sequence, status_sequence);
+                status_sequence = status_sequence.wrapping_add(1);
                 bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
                 output_allowed = update_output_safety(
                     &driver,
                     command_allows_output,
                     output_gate.allows_output_raw(bus_voltage_raw),
-                    controller.state().fault.is_some(),
+                    controller_faulted,
                 );
-                status_sequence = publish_status_report(status_sequence, controller.state());
-                core::hint::black_box(controller.state());
+                core::hint::black_box((command_allows_output, controller_faulted));
             });
             benchmark_sequence = publish_benchmark_report(
                 benchmark_sequence,
@@ -157,7 +156,44 @@ fn firmware_main() -> ! {
 }
 
 #[cfg(target_os = "none")]
+struct ControllerStorage(UnsafeCell<Controller>);
+
+#[cfg(target_os = "none")]
+unsafe impl Sync for ControllerStorage {}
+
+#[cfg(target_os = "none")]
+static CONTROLLER: ControllerStorage = ControllerStorage(UnsafeCell::new(Controller::new(LIMITS)));
+
+#[cfg(target_os = "none")]
+static COMMAND_ALLOWS_OUTPUT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "none")]
 #[inline(never)]
+fn service_host_debug(command_sequence: &mut u8, status_sequence: u8) -> (bool, bool) {
+    let controller = controller_storage_mut();
+    if let Some(packet) = debug_report::poll_command(command_sequence) {
+        let command_allows_output = apply_host_command(controller, packet.command);
+        COMMAND_ALLOWS_OUTPUT.store(command_allows_output, Ordering::Relaxed);
+    }
+
+    let state = controller.state();
+    publish_status_report(status_sequence, state);
+    (
+        COMMAND_ALLOWS_OUTPUT.load(Ordering::Relaxed),
+        state.fault.is_some(),
+    )
+}
+
+#[cfg(target_os = "none")]
+fn controller_storage_mut() -> &'static mut Controller {
+    // SAFETY: The current firmware is single-threaded at this layer: command
+    // polling/status publication happen from the main-loop branch only, and no
+    // interrupt handler accesses this controller storage. Keeping it out of
+    // `firmware_main` avoids perturbing the measured 50 kHz fast-loop frame.
+    unsafe { &mut *CONTROLLER.0.get() }
+}
+
+#[cfg(target_os = "none")]
 fn apply_host_command(controller: &mut Controller, command: obot_core::MotorCommand) -> bool {
     let mode = command.mode;
     let command_accepted = controller.apply(command).is_ok();
@@ -167,13 +203,12 @@ fn apply_host_command(controller: &mut Controller, command: obot_core::MotorComm
 }
 
 #[cfg(target_os = "none")]
-fn publish_status_report(sequence: u8, state: obot_core::MotorState) -> u8 {
+fn publish_status_report(sequence: u8, state: obot_core::MotorState) {
     debug_report::publish_status(StatusPacket { sequence, state });
     core::hint::black_box((
         debug_report::status_packet_ptr(),
         debug_report::status_packet_len(),
     ));
-    sequence.wrapping_add(1)
 }
 
 #[cfg(target_os = "none")]
