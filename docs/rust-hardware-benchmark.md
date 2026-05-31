@@ -411,3 +411,64 @@ Interpretation at 170 MHz:
 Comparison caveat:
 
 This is the current best Rust FOC subset result. Its mean fast-loop cost is now below the recorded C++ full fast-loop mean (`397.095` cycles Rust subset versus `708.965` cycles C++ baseline), but it remains not feature-equivalent because the Rust path still uses a fixed zero electrical angle and does not apply voltage commands to PWM outputs. The observed max sample (`836` cycles) is still higher than the C++ max fast-loop sample (`710` cycles), so max-latency variance remains worth tracking as functionality is added.
+
+
+## 2026-05-31: Hall-Derived FOC Angle Surface, J-Link Debug Readout
+
+Firmware commits:
+
+- `c7ed6aa Add hall-derived FOC angle`
+- `f5cf5f5 Use hall sector for FOC sincos`
+- `5f2fd92 Inline hall sampling path`
+
+Change under test:
+
+- Rust FOC now uses the live hall count to derive the electrical angle for the `motor_hall` parameter set.
+- `phase_mode = 1` is represented as phase sign `-1`, matching the C++ `set_phase_mode()` behavior.
+- Runtime trigonometry is avoided for hall input: the current 1..6 hall sector maps directly to a six-entry electrical sin/cos table.
+- The firmware still writes zero PWM and keeps bridge outputs disabled.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+```
+
+Release artifact sizes:
+
+```text
+133560 target/thumbv7em-none-eabihf/release/obot-g474
+  9700 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+Flash result:
+
+```text
+J-Link: Flash download: Bank 0 @ 0x08000000: 1 range affected (10240 bytes)
+J-Link: Flash download: Program & Verify speed: 77 KB/s
+O.K.
+```
+
+Representative readout after flashing:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 919, 3442, 127, 17372, 433.651, 3399.125, 126.391, 16969.975
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `433.651 cycles = 2.551 us`.
+- Main-loop mean execution: `126.391 cycles = 0.744 us`.
+- Combined 100 us max load: `(5 * 919 + 127) / 17000 = 27.78%`.
+- Combined 100 us mean load: `(5 * 433.651 + 126.391) / 17000 = 13.50%`.
+- Incremental mean fast-loop cost over the fixed-angle inlined FOC result: `433.651 - 397.095 = 36.556 cycles = 0.215 us`.
+- Incremental mean fast-loop cost over current conversion: `433.651 - 173.259 = 260.392 cycles = 1.532 us`.
+
+Comparison caveat:
+
+This is closer to the C++ `motor_hall` control path because it uses live hall-derived electrical angle, current conversion, FOC transforms, current filtering, PI current control, and voltage command generation. It is still not feature-equivalent: commanded voltages are not applied to PWM, outputs remain disabled, live host commands are absent, and full safety/fault behavior is not implemented. Mean fast-loop cost is below the C++ full fast-loop mean (`433.651` cycles Rust subset versus `708.965` cycles C++ baseline), but the max sample remains higher (`919` cycles Rust subset versus `710` cycles C++ baseline).
