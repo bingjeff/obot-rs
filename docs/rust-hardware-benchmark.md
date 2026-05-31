@@ -1072,3 +1072,78 @@ Current comparison:
 
 The Rust path now includes the earlier motor-control subset, output safety gates, J-Link motor command/status, host-triggered driver command handling, and DRV8323S register programming/readback reporting. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not applied to HRTIM, bridge outputs remain disabled, successful DRV8323S configuration is not yet achieved on this attached hardware state, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
 
+
+## 2026-05-31: DRV8323S Manual Chip-Select And Bus-Voltage Diagnosis
+
+Change under test:
+
+- Switched DRV8323S transactions from C++-matching SPI1 TI/NSS alternate-function framing to explicit GPIO chip-select with normal 16-bit SPI framing.
+- Kept host-triggered `configure-enable`, PC13 failure-disable behavior, HRTIM outputs disabled, and zero-voltage PWM writes unchanged.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- write-driver-command-jlink --packet-address 0x2000007f --sequence-address 0x2000009f --sequence 2 --command configure-enable
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-driver-jlink --address 0x20000081
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink --address 0x20000020
+```
+
+Release artifact sizes:
+
+```text
+137752 target/thumbv7em-none-eabihf/release/obot-g474
+ 16872 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+`arm-none-eabi-size`:
+
+```text
+   text   data    bss    dec    hex filename
+  16840     32    132  17004   426c target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+Driver report after `configure-enable` with explicit GPIO chip-select:
+
+```text
+name, sequence, configured, verify_error_mask, transfer_error_mask, status_before, status_after
+rust_debug, 0, false, 0x001F, 0x0000, 0xFFFFFFFF, 0xFFFFFFFF
+```
+
+Power/register evidence after the failed configure command:
+
+```text
+ADC1 DR @ 0x50000040 = 0x00000003
+ADC1 ISR/IER/CR @ 0x50000000 = 0x0000001B 0x00000000 0x50000005
+GPIOC IDR @ 0x48000810 = 0x00004000
+```
+
+Interpretation:
+
+- Manual chip-select did not change the DRV all-ones readback, so SPI NSS/TI framing is less likely to be the primary cause.
+- ADC1 bus-voltage raw sample is `3`, about `0.012 V` with the active `motor_hall` calibration, far below the `8 V` output-gate threshold.
+- GPIOC IDR shows PC13 low and PC14 high after failed configure, so the failure path did not leave driver enable asserted.
+- Current evidence points to missing bus/VM supply on the attached hardware state as the strongest explanation for DRV readback `0xFFFFFFFF`.
+
+Representative steady-state benchmark:
+
+```text
+rust_debug, 892, 4552, 1071, 17002, 410.655, 3399.009, 1069.555, 16914.144
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `410.655 cycles = 2.416 us`.
+- Main-loop mean execution: `1069.555 cycles = 6.291 us`.
+- Combined 100 us max load: `(5 * 892 + 1071) / 17000 = 32.54%`.
+- Combined 100 us mean load: `(5 * 410.655 + 1069.555) / 17000 = 18.37%`.
+
+Current comparison:
+
+The Rust path now includes the earlier motor-control subset, output safety gates, J-Link motor command/status, host-triggered driver command handling, explicit chip-select DRV8323S SPI transactions, and DRV8323S register programming/readback reporting. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not applied to HRTIM, bridge outputs remain disabled, successful DRV8323S configuration requires bus/VM supply that is absent in the current attached hardware state, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
+

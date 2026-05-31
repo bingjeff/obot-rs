@@ -29,7 +29,8 @@ const GPIO_AF5: u32 = 5;
 const SPI_CR1_MSTR: u32 = 1 << 2;
 const SPI_CR1_BR_DIV64: u32 = 6 << 3;
 const SPI_CR1_SPE: u32 = 1 << 6;
-const SPI_CR2_FRF: u32 = 1 << 4;
+const SPI_CR1_SSI: u32 = 1 << 8;
+const SPI_CR1_SSM: u32 = 1 << 9;
 const SPI_CR2_DS_16BIT: u32 = 15 << 8;
 const SPI_SR_RXNE: u32 = 1 << 0;
 
@@ -135,13 +136,18 @@ impl Drv8323s {
     }
 
     fn start_transaction(&self) {
-        configure_nss_alternate();
+        configure_nss_idle_high();
         write(SPI_CR1, 0);
-        write(SPI_CR2, SPI_CR2_DS_16BIT | SPI_CR2_FRF);
-        write(SPI_CR1, SPI_CR1_MSTR | SPI_CR1_BR_DIV64 | SPI_CR1_SPE);
+        write(SPI_CR2, SPI_CR2_DS_16BIT);
+        write(
+            SPI_CR1,
+            SPI_CR1_MSTR | SPI_CR1_BR_DIV64 | SPI_CR1_SSI | SPI_CR1_SSM | SPI_CR1_SPE,
+        );
+        write(GPIO_BSRR, 1 << (NSS_PIN + 16));
     }
 
     fn end_transaction(&self) {
+        write(GPIO_BSRR, 1 << NSS_PIN);
         write(SPI_CR1, 0);
         configure_nss_idle_high();
     }
@@ -178,10 +184,6 @@ fn configure_spi_pins_idle() {
     configure_pin_alt(MISO_PIN, GPIO_PULL_UP);
     configure_pin_alt(MOSI_PIN, GPIO_PULL_NONE);
     configure_nss_idle_high();
-}
-
-fn configure_nss_alternate() {
-    configure_pin_alt(NSS_PIN, GPIO_PULL_NONE);
 }
 
 fn configure_nss_idle_high() {
