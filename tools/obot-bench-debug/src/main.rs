@@ -1298,6 +1298,9 @@ impl AcceptedProofUsbOptions {
         if options.samples == 0 {
             return Err("accepted-proof-usb requires at least one sample".to_string());
         }
+        if options.elf_path.is_some() && options.expected_firmware_version.is_none() {
+            return Err("--elf requires --expect-firmware-version for accepted-proof-usb".to_string());
+        }
         if options.sequence > 248 {
             return Err("--sequence must be 248 or lower for accepted-proof-usb".to_string());
         }
@@ -1379,6 +1382,9 @@ impl PoweredReadyProofUsbOptions {
             index += 1;
         }
 
+        if options.elf_path.is_some() && options.expected_firmware_version.is_none() {
+            return Err("--elf requires --expect-firmware-version for powered-ready-proof-usb".to_string());
+        }
         if options.poll_interval_ms == 0 {
             return Err("--poll-interval-ms must be nonzero".to_string());
         }
@@ -4672,6 +4678,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_accepted_proof_elf_without_expected_firmware_version() {
+        let error = AcceptedProofUsbOptions::parse(&[
+            "--elf".to_string(),
+            "target/thumbv7em-none-eabihf/release/obot-g474".to_string(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "--elf requires --expect-firmware-version for accepted-proof-usb"
+        );
+    }
+
+    #[test]
     fn rejects_accepted_proof_usb_sequence_that_would_wrap() {
         let error = AcceptedProofUsbOptions::parse(&[
             "--sequence".to_string(),
@@ -4729,6 +4749,20 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "--poll-interval-ms must be nonzero");
+    }
+
+    #[test]
+    fn rejects_powered_ready_proof_elf_without_expected_firmware_version() {
+        let error = PoweredReadyProofUsbOptions::parse(&[
+            "--elf".to_string(),
+            "target/thumbv7em-none-eabihf/release/obot-g474".to_string(),
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "--elf requires --expect-firmware-version for powered-ready-proof-usb"
+        );
     }
 
     #[test]
