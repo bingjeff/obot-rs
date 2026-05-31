@@ -29,8 +29,7 @@ const GPIO_AF5: u32 = 5;
 const SPI_CR1_MSTR: u32 = 1 << 2;
 const SPI_CR1_BR_DIV64: u32 = 6 << 3;
 const SPI_CR1_SPE: u32 = 1 << 6;
-const SPI_CR1_SSI: u32 = 1 << 8;
-const SPI_CR1_SSM: u32 = 1 << 9;
+const SPI_CR2_TI_FRAME_FORMAT: u32 = 1 << 4;
 const SPI_CR2_DS_16BIT: u32 = 15 << 8;
 const SPI_SR_RXNE: u32 = 1 << 0;
 
@@ -110,7 +109,7 @@ impl Drv8323s {
             status_before: self.read_status_in_transaction(),
             ..Drv8323sConfigReport::default()
         };
-        if report.status_before.is_none() {
+        if status_is_no_response(report.status_before) {
             report.transfer_error_mask |= TRANSFER_STATUS_BEFORE_BIT;
         }
 
@@ -120,6 +119,9 @@ impl Drv8323s {
             let write_ok = self.write_register(reg_out).is_some();
             let reg_in = self.read_register(address);
             match (write_ok, reg_in) {
+                (_, Some(reg_in)) if register_is_no_response(reg_in) => {
+                    report.transfer_error_mask |= transfer_bit
+                }
                 (true, Some(reg_in)) if (reg_in & 0x07FF) == (reg_out & 0x07FF) => {}
                 (true, Some(_)) => report.verify_error_mask |= 1 << index,
                 _ => report.transfer_error_mask |= transfer_bit,
@@ -127,7 +129,7 @@ impl Drv8323s {
         }
 
         report.status_after = self.read_status_in_transaction();
-        if report.status_after.is_none() {
+        if status_is_no_response(report.status_after) {
             report.transfer_error_mask |= TRANSFER_STATUS_AFTER_BIT;
         }
 
@@ -136,14 +138,10 @@ impl Drv8323s {
     }
 
     fn start_transaction(&self) {
-        configure_nss_idle_high();
+        configure_nss_alt();
         write(SPI_CR1, 0);
-        write(SPI_CR2, SPI_CR2_DS_16BIT);
-        write(
-            SPI_CR1,
-            SPI_CR1_MSTR | SPI_CR1_BR_DIV64 | SPI_CR1_SSI | SPI_CR1_SSM | SPI_CR1_SPE,
-        );
-        write(GPIO_BSRR, 1 << (NSS_PIN + 16));
+        write(SPI_CR2, SPI_CR2_DS_16BIT | SPI_CR2_TI_FRAME_FORMAT);
+        write(SPI_CR1, SPI_CR1_MSTR | SPI_CR1_BR_DIV64 | SPI_CR1_SPE);
     }
 
     fn end_transaction(&self) {
@@ -172,6 +170,20 @@ impl Drv8323s {
     }
 }
 
+fn status_is_no_response(status: Option<Drv8323sStatus>) -> bool {
+    match status {
+        Some(status) => {
+            register_is_no_response(status.fault_status_1)
+                && register_is_no_response(status.vgs_status_2)
+        }
+        None => true,
+    }
+}
+
+const fn register_is_no_response(value: u16) -> bool {
+    value == 0xFFFF
+}
+
 fn enable_clocks() {
     modify(RCC_AHB2ENR, |value| value | RCC_AHB2ENR_GPIOAEN);
     modify(RCC_APB2ENR, |value| value | RCC_APB2ENR_SPI1EN);
@@ -197,6 +209,10 @@ fn configure_nss_idle_high() {
     modify(GPIO_PUPDR, |value| {
         set_two_bit_field(value, NSS_PIN, GPIO_PULL_NONE)
     });
+}
+
+fn configure_nss_alt() {
+    configure_pin_alt(NSS_PIN, GPIO_PULL_NONE);
 }
 
 fn configure_pin_alt(pin: u32, pull: u32) {
@@ -257,4 +273,26 @@ fn write16(address: usize, value: u16) {
     // SAFETY: The caller passes STM32G474 memory-mapped register addresses.
     // Volatile access is required so register writes are performed as requested.
     unsafe { write_volatile(address as *mut u16, value) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_ones_status_is_no_response() {
+        assert!(status_is_no_response(Some(Drv8323sStatus {
+            fault_status_1: 0xFFFF,
+            vgs_status_2: 0xFFFF,
+        })));
+        assert!(status_is_no_response(None));
+    }
+
+    #[test]
+    fn mixed_status_is_reportable_response() {
+        assert!(!status_is_no_response(Some(Drv8323sStatus {
+            fault_status_1: 0x0000,
+            vgs_status_2: 0xFFFF,
+        })));
+    }
 }

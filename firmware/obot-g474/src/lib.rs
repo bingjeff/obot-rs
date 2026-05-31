@@ -5,7 +5,6 @@ pub mod adc;
 pub mod cycle_counter;
 #[cfg(target_os = "none")]
 pub mod driver;
-#[cfg(target_os = "none")]
 pub mod drv8323s;
 #[cfg(target_os = "none")]
 pub mod hall;
