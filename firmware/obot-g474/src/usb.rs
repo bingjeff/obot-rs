@@ -1,11 +1,13 @@
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-use obot_core::benchmark::BenchmarkReport;
+use obot_core::{benchmark::BenchmarkReport, output::OutputSafetyStatus};
 use obot_protocol::{
     COMMAND_PACKET_LEN, CommandPacket, STATUS_PACKET_LEN, StatusPacket,
     usb_control::{self, ControlRequest, ControlResponse, SetupPacket},
 };
+
+use crate::drv8323s::Drv8323sConfigReport;
 
 const RCC_BASE: usize = 0x4002_1000;
 const RCC_APB1RSTR1: usize = RCC_BASE + 0x38;
@@ -137,6 +139,21 @@ static BENCH_T_EXEC_FASTLOOP: AtomicU32 = AtomicU32::new(0);
 static BENCH_T_PERIOD_FASTLOOP: AtomicU32 = AtomicU32::new(0);
 static BENCH_T_EXEC_MAINLOOP: AtomicU32 = AtomicU32::new(0);
 static BENCH_T_PERIOD_MAINLOOP: AtomicU32 = AtomicU32::new(0);
+static OUTPUT_SAFETY_FLAGS: AtomicU32 = AtomicU32::new(0);
+static BUS_VOLTAGE_RAW: AtomicU32 = AtomicU32::new(0);
+static DRIVER_CONFIGURED: AtomicU8 = AtomicU8::new(0);
+static DRIVER_VERIFY_ERROR_MASK: AtomicU32 = AtomicU32::new(0);
+static DRIVER_TRANSFER_ERROR_MASK: AtomicU32 = AtomicU32::new(0);
+static DRIVER_STATUS_BEFORE: AtomicU32 = AtomicU32::new(0);
+static DRIVER_STATUS_AFTER: AtomicU32 = AtomicU32::new(0);
+
+const OUTPUT_ALLOWED_BIT: u32 = 1 << 0;
+const COMMAND_BLOCKED_BIT: u32 = 1 << 1;
+const BUS_BLOCKED_BIT: u32 = 1 << 2;
+const DRIVER_NOT_ENABLED_BIT: u32 = 1 << 3;
+const DRIVER_FAULT_LATCHED_BIT: u32 = 1 << 4;
+const CONTROLLER_FAULTED_BIT: u32 = 1 << 5;
+const HOST_TIMED_OUT_BIT: u32 = 1 << 6;
 
 pub struct UsbDevice;
 
@@ -214,6 +231,42 @@ pub fn publish_text_api_benchmark(report: BenchmarkReport) {
     BENCH_T_PERIOD_FASTLOOP.store(report.t_period_fastloop(), Ordering::Relaxed);
     BENCH_T_EXEC_MAINLOOP.store(report.t_exec_mainloop(), Ordering::Relaxed);
     BENCH_T_PERIOD_MAINLOOP.store(report.t_period_mainloop(), Ordering::Relaxed);
+}
+
+pub fn publish_output_safety_status(status: OutputSafetyStatus) {
+    OUTPUT_SAFETY_FLAGS.store(output_safety_flags(status), Ordering::Relaxed);
+}
+
+pub fn publish_bus_voltage_raw(raw: u16) {
+    BUS_VOLTAGE_RAW.store(raw as u32, Ordering::Relaxed);
+}
+
+pub fn publish_driver_report(report: Drv8323sConfigReport) {
+    DRIVER_CONFIGURED.store(u8::from(report.configured()), Ordering::Relaxed);
+    DRIVER_VERIFY_ERROR_MASK.store(report.verify_error_mask as u32, Ordering::Relaxed);
+    DRIVER_TRANSFER_ERROR_MASK.store(report.transfer_error_mask as u32, Ordering::Relaxed);
+    DRIVER_STATUS_BEFORE.store(
+        report.status_before.map_or(0, |status| status.as_u32()),
+        Ordering::Relaxed,
+    );
+    DRIVER_STATUS_AFTER.store(
+        report.status_after.map_or(0, |status| status.as_u32()),
+        Ordering::Relaxed,
+    );
+}
+
+fn output_safety_flags(status: OutputSafetyStatus) -> u32 {
+    bool_flag(status.output_allowed, OUTPUT_ALLOWED_BIT)
+        | bool_flag(status.command_blocked, COMMAND_BLOCKED_BIT)
+        | bool_flag(status.bus_blocked, BUS_BLOCKED_BIT)
+        | bool_flag(status.driver_not_enabled, DRIVER_NOT_ENABLED_BIT)
+        | bool_flag(status.driver_fault_latched, DRIVER_FAULT_LATCHED_BIT)
+        | bool_flag(status.controller_faulted, CONTROLLER_FAULTED_BIT)
+        | bool_flag(status.host_timed_out, HOST_TIMED_OUT_BIT)
+}
+
+fn bool_flag(value: bool, bit: u32) -> u32 {
+    if value { bit } else { 0 }
 }
 
 fn enable_gpioa_clock() {
@@ -375,6 +428,19 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "t_period_fastloop",
     "t_exec_mainloop",
     "t_period_mainloop",
+    "output_allowed",
+    "command_blocked",
+    "bus_blocked",
+    "driver_not_enabled",
+    "driver_fault_latched",
+    "controller_faulted",
+    "host_timed_out",
+    "bus_voltage_raw",
+    "driver_configured",
+    "verify_error_mask",
+    "transfer_error_mask",
+    "status_before",
+    "status_after",
 ];
 
 fn send_text_api_response_immediate(request: &[u8]) {
@@ -423,8 +489,35 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
         b"t_period_mainloop" => {
             write_u32_decimal(BENCH_T_PERIOD_MAINLOOP.load(Ordering::Relaxed), output)
         }
+        b"output_allowed" => write_bool(load_output_safety_flag(OUTPUT_ALLOWED_BIT), output),
+        b"command_blocked" => write_bool(load_output_safety_flag(COMMAND_BLOCKED_BIT), output),
+        b"bus_blocked" => write_bool(load_output_safety_flag(BUS_BLOCKED_BIT), output),
+        b"driver_not_enabled" => {
+            write_bool(load_output_safety_flag(DRIVER_NOT_ENABLED_BIT), output)
+        }
+        b"driver_fault_latched" => {
+            write_bool(load_output_safety_flag(DRIVER_FAULT_LATCHED_BIT), output)
+        }
+        b"controller_faulted" => {
+            write_bool(load_output_safety_flag(CONTROLLER_FAULTED_BIT), output)
+        }
+        b"host_timed_out" => write_bool(load_output_safety_flag(HOST_TIMED_OUT_BIT), output),
+        b"bus_voltage_raw" => write_u32_decimal(BUS_VOLTAGE_RAW.load(Ordering::Relaxed), output),
+        b"driver_configured" => write_bool(DRIVER_CONFIGURED.load(Ordering::Relaxed) != 0, output),
+        b"verify_error_mask" => {
+            write_u32_decimal(DRIVER_VERIFY_ERROR_MASK.load(Ordering::Relaxed), output)
+        }
+        b"transfer_error_mask" => {
+            write_u32_decimal(DRIVER_TRANSFER_ERROR_MASK.load(Ordering::Relaxed), output)
+        }
+        b"status_before" => write_u32_decimal(DRIVER_STATUS_BEFORE.load(Ordering::Relaxed), output),
+        b"status_after" => write_u32_decimal(DRIVER_STATUS_AFTER.load(Ordering::Relaxed), output),
         _ => None,
     }
+}
+
+fn load_output_safety_flag(bit: u32) -> bool {
+    OUTPUT_SAFETY_FLAGS.load(Ordering::Relaxed) & bit != 0
 }
 
 fn parse_decimal_usize(input: &[u8]) -> Option<usize> {
@@ -439,6 +532,10 @@ fn parse_decimal_usize(input: &[u8]) -> Option<usize> {
         value = value.checked_mul(10)?.checked_add((byte - b'0') as usize)?;
     }
     Some(value)
+}
+
+fn write_bool(value: bool, output: &mut [u8]) -> Option<usize> {
+    write_bytes(if value { b"true" } else { b"false" }, output)
 }
 
 fn write_u32_decimal(value: u32, output: &mut [u8]) -> Option<usize> {
@@ -769,7 +866,7 @@ mod tests {
 
         let mut output = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
         let len = format_text_api_response(b"api_length", &mut output).unwrap();
-        assert_eq!(&output[..len], b"8");
+        assert_eq!(&output[..len], b"21");
 
         let len = format_text_api_response(b"api_name=4", &mut output).unwrap();
         assert_eq!(&output[..len], b"t_exec_fastloop");
@@ -785,5 +882,60 @@ mod tests {
 
         assert_eq!(format_text_api_response(b"unknown", &mut output), None);
         assert_eq!(format_text_api_response(b"api_name=999", &mut output), None);
+    }
+
+    #[test]
+    fn immediate_text_api_exposes_safety_and_driver_state() {
+        publish_output_safety_status(OutputSafetyStatus {
+            output_allowed: false,
+            command_blocked: true,
+            bus_blocked: true,
+            driver_not_enabled: true,
+            driver_fault_latched: false,
+            controller_faulted: false,
+            host_timed_out: true,
+        });
+        publish_bus_voltage_raw(1963);
+        publish_driver_report(Drv8323sConfigReport {
+            status_before: Some(crate::drv8323s::Drv8323sStatus {
+                fault_status_1: 0x1234,
+                vgs_status_2: 0x5678,
+            }),
+            status_after: Some(crate::drv8323s::Drv8323sStatus {
+                fault_status_1: 0x00AA,
+                vgs_status_2: 0x00BB,
+            }),
+            verify_error_mask: 0x12,
+            transfer_error_mask: 0x40,
+        });
+
+        let mut output = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
+
+        let len = format_text_api_response(b"output_allowed", &mut output).unwrap();
+        assert_eq!(&output[..len], b"false");
+        let len = format_text_api_response(b"command_blocked", &mut output).unwrap();
+        assert_eq!(&output[..len], b"true");
+        let len = format_text_api_response(b"bus_blocked", &mut output).unwrap();
+        assert_eq!(&output[..len], b"true");
+        let len = format_text_api_response(b"driver_not_enabled", &mut output).unwrap();
+        assert_eq!(&output[..len], b"true");
+        let len = format_text_api_response(b"driver_fault_latched", &mut output).unwrap();
+        assert_eq!(&output[..len], b"false");
+        let len = format_text_api_response(b"controller_faulted", &mut output).unwrap();
+        assert_eq!(&output[..len], b"false");
+        let len = format_text_api_response(b"host_timed_out", &mut output).unwrap();
+        assert_eq!(&output[..len], b"true");
+        let len = format_text_api_response(b"bus_voltage_raw", &mut output).unwrap();
+        assert_eq!(&output[..len], b"1963");
+        let len = format_text_api_response(b"driver_configured", &mut output).unwrap();
+        assert_eq!(&output[..len], b"false");
+        let len = format_text_api_response(b"verify_error_mask", &mut output).unwrap();
+        assert_eq!(&output[..len], b"18");
+        let len = format_text_api_response(b"transfer_error_mask", &mut output).unwrap();
+        assert_eq!(&output[..len], b"64");
+        let len = format_text_api_response(b"status_before", &mut output).unwrap();
+        assert_eq!(&output[..len], b"1450709556");
+        let len = format_text_api_response(b"status_after", &mut output).unwrap();
+        assert_eq!(&output[..len], b"12255402");
     }
 }

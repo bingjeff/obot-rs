@@ -617,6 +617,7 @@ fn wait_cycles(cycle_counter: &impl CycleCounter, cycles: u32) {
 
 #[cfg(target_os = "none")]
 fn publish_driver_report(sequence: u8, report: Drv8323sConfigReport) {
+    obot_g474::usb::publish_driver_report(report);
     debug_report::publish_driver_report(DriverReportPacket {
         sequence,
         configured: report.configured(),
@@ -677,6 +678,7 @@ fn publish_status_report(sequence: u8, state: obot_core::MotorState) {
 
 #[cfg(target_os = "none")]
 fn publish_output_safety_report(sequence: u8, status: OutputSafetyStatus) -> u8 {
+    obot_g474::usb::publish_output_safety_status(status);
     debug_report::publish_output_safety(OutputSafetyPacket { sequence, status });
     core::hint::black_box((
         debug_report::output_safety_packet_ptr(),
@@ -687,6 +689,7 @@ fn publish_output_safety_report(sequence: u8, status: OutputSafetyStatus) -> u8 
 
 #[cfg(target_os = "none")]
 fn publish_bus_voltage_report(sequence: u8, raw: u16) -> u8 {
+    obot_g474::usb::publish_bus_voltage_raw(raw);
     debug_report::publish_bus_voltage(BusVoltagePacket { sequence, raw });
     core::hint::black_box((
         debug_report::bus_voltage_packet_ptr(),

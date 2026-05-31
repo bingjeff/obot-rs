@@ -48,8 +48,11 @@ For one-off USB text API reads, use:
 
 ```sh
 cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-text-api-usb t_exec_fastloop
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-text-api-usb output_allowed
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-text-api-usb driver_configured
 ```
 
+The USB text endpoint exposes the benchmark fields plus output-safety gates, `bus_voltage_raw`, and the latest DRV8323S configuration report fields needed for powered bring-up checks.
 
 For detailed benchmark diagnostics, including sample counts and last-cycle values for each tracked statistic:
 
