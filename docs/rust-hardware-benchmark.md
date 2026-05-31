@@ -259,3 +259,56 @@ Interpretation at 170 MHz:
 Comparison caveat:
 
 This build converts raw ADC3/4/5 current samples using the C++ `motor_hall` gain/bias formula and leaves all HRTIM outputs disabled. FOC d/q transform, current filtering, PI current control, voltage command generation, safety/fault handling, and host API parity remain unimplemented.
+
+
+## 2026-05-31: Zero-Command FOC Current-Control Surface, J-Link Debug Readout
+
+Firmware commit: `a75f1f2 Add FOC current-control benchmark path`
+
+Build and flash steps used:
+
+```sh
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+/home/bingjeff/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy \
+  -O binary \
+  target/thumbv7em-none-eabihf/release/obot-g474 \
+  target/thumbv7em-none-eabihf/release/obot-g474.bin
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink
+```
+
+Release artifact sizes:
+
+```text
+133624 target/thumbv7em-none-eabihf/release/obot-g474
+  9744 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+Flash result:
+
+```text
+J-Link: Flash download: Bank 0 @ 0x08000000: 1 range affected (10240 bytes)
+J-Link: Flash download: Program & Verify speed: 77 KB/s
+O.K.
+```
+
+Representative readout after flashing:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 1007, 3789, 121, 17007, 982, 3399.188, 120.823, 16972.603
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `982 cycles = 5.776 us`.
+- Main-loop mean execution: `120.823 cycles = 0.711 us`.
+- Fast-loop mean period: `3399.188 cycles = 19.995 us`.
+- Main-loop mean period: `16972.603 cycles = 99.839 us` in the sampled running average.
+- Combined 100 us max safe-zero-PWM-plus-hall-plus-current-conversion-plus-FOC load: `(5 * 1007 + 121) / 17000 = 30.33%`.
+- Combined 100 us mean safe-zero-PWM-plus-hall-plus-current-conversion-plus-FOC load: `(5 * 982 + 120.823) / 17000 = 29.59%`.
+- Incremental mean fast-loop cost over current conversion: `982 - 173.259 = 808.741 cycles = 4.757 us`.
+
+Comparison caveat:
+
+This build runs the Rust FOC math with a fixed zero electrical angle, zero current command, measured current conversion, current filtering, PI current control, and voltage command generation. It still discards FOC voltage commands, writes zero PWM, and keeps bridge outputs disabled. It does not yet include hall-derived electrical angle, live command input, PWM voltage application, full safety/fault handling, or host API parity.
