@@ -549,3 +549,63 @@ Current comparison:
 This Rust path now includes live hall-derived electrical angle, current conversion, FOC transforms, current filtering, PI current control, voltage command generation, and candidate PWM compare computation. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not yet applied to HRTIM in the benchmarked path, bridge outputs remain disabled, live host commands are absent, and full bus-voltage/fault gating is not implemented.
 
 The current Rust combined mean load remains below the recorded C++ no-voltage `motor_hall` baseline (`29.39%` versus `41.77%`), but Rust fast-loop execution is now slower than the C++ fast-loop mean (`976.951` cycles versus `708.965` cycles), and the Rust max sample remains higher (`977` cycles versus `710` cycles). The next performance work should focus on the PWM compare conversion/code shape before enabling real output writes.
+
+
+
+## 2026-05-31: Integer-Clamped PWM Compare Conversion, J-Link Debug Readout
+
+Firmware commit: `fd8e0c9 Clamp PWM compares as integers`
+
+Change under test:
+
+- Changed PWM compare conversion from float-domain clamp plus float-to-u32 conversion to float scaling, float-to-i32 conversion, and integer-domain clamp.
+- This removes the VFP compare/`vmrs` sequence from the PWM compare bound checks while keeping final compare values clamped to the same HRTIM register range.
+- Bridge outputs remain disabled; the measured path still writes zero PWM and computes candidate compare values only.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+```
+
+Release artifact sizes:
+
+```text
+135788 target/thumbv7em-none-eabihf/release/obot-g474
+ 12372 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+Flash result:
+
+```text
+J-Link: Flash download: Bank 0 @ 0x08000000: 1 range affected (14336 bytes)
+J-Link: Flash download: Program & Verify speed: 79 KB/s
+O.K.
+```
+
+Representative readouts after flashing:
+
+```text
+rust_debug, 935, 3423, 136, 17006, 425.384, 3399.006, 135.695, 16956.187
+rust_debug, 935, 3433, 136, 17009, 425.045, 3399.443, 135.823, 16974.811
+rust_debug, 935, 3433, 136, 17009, 424.918, 3399.604, 135.873, 16982.034
+```
+
+Interpretation at 170 MHz using the best repeat readout:
+
+- Fast-loop mean execution: `424.918 cycles = 2.499 us`.
+- Main-loop mean execution: `135.873 cycles = 0.799 us`.
+- Combined 100 us max load: `(5 * 935 + 136) / 17000 = 28.30%`.
+- Combined 100 us mean load: `(5 * 424.918 + 135.873) / 17000 = 13.30%`.
+- Mean fast-loop improvement over previous PWM compare best: `976.951 - 424.918 = 552.033 cycles = 3.247 us`.
+- Incremental mean fast-loop cost over hall-derived FOC without PWM compares: `424.918 - 433.651 = -8.733 cycles`; this is within benchmark/code-shape noise and shows the candidate compare computation is no longer the dominant cost.
+
+Current comparison:
+
+This is the current best Rust measured path with live hall-derived electrical angle, current conversion, FOC transforms, current filtering, PI current control, voltage command generation, and candidate PWM compare computation. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not yet applied to HRTIM in the benchmarked path, bridge outputs remain disabled, live host commands are absent, and full bus-voltage/fault gating is not implemented.
+
+The current Rust fast-loop mean is below the recorded C++ no-voltage `motor_hall` fast-loop mean (`424.918` cycles Rust versus `708.965` cycles C++), and the Rust combined mean load remains below C++ (`13.30%` versus `41.77%`). The Rust max sample is still higher than the C++ max fast-loop sample (`935` cycles Rust versus `710` cycles C++), so max-latency variance remains a tracking item as output gating and host command handling are added.
