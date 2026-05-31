@@ -1792,6 +1792,18 @@ fn accepted_proof_usb(options: &AcceptedProofUsbOptions) -> Result<String, Strin
         if !symbols.is_empty() {
             return Err(command_failure(output));
         }
+
+        if let Some(expected) = &options.expected_firmware_version {
+            let identity_present = elf_contains_bytes(elf_path, expected.as_bytes())?;
+            append_proof_section(
+                &mut output,
+                "static_firmware_identity",
+                &format_static_firmware_identity_csv(DEFAULT_NAME, elf_path, expected, identity_present),
+            );
+            if !identity_present {
+                return Err(command_failure(output));
+            }
+        }
     }
 
     let firmware_version = read_text_api_usb(&TextApiUsbOptions {
@@ -1984,6 +1996,21 @@ fn format_no_heap_csv(name: &str, elf_path: &Path, symbols: &[String]) -> String
         elf_path.display(),
         heap_symbols,
         symbols.is_empty()
+    )
+}
+
+fn format_static_firmware_identity_csv(
+    name: &str,
+    elf_path: &Path,
+    expected_firmware_version: &str,
+    check_passed: bool,
+) -> String {
+    format!(
+        "name, elf, expected_firmware_version, check_passed\n{}, {}, {}, {}\n",
+        name,
+        elf_path.display(),
+        expected_firmware_version,
+        check_passed
     )
 }
 
@@ -2926,6 +2953,19 @@ fn resolve_optional_symbol_address(
         Some(address) => Ok(address),
         None => resolve_symbol_address(path, symbol),
     }
+}
+
+fn elf_contains_bytes(path: &Path, needle: &[u8]) -> Result<bool, String> {
+    if needle.is_empty() {
+        return Ok(true);
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
+            "failed to read firmware ELF `{}` for identity check: {error}",
+            path.display()
+        )
+    })?;
+    Ok(bytes.windows(needle.len()).any(|window| window == needle))
 }
 
 fn heap_allocator_symbols_in_elf(path: &Path) -> Result<Vec<String>, String> {
@@ -4522,6 +4562,28 @@ mod tests {
             ),
             "name, elf, heap_allocator_symbols, check_passed\nrust, firmware.elf, __rust_alloc|__rust_dealloc, false\n"
         );
+    }
+
+    #[test]
+    fn formats_static_firmware_identity_csv() {
+        assert_eq!(
+            format_static_firmware_identity_csv("rust", Path::new("firmware.elf"), "741ffaf", true),
+            "name, elf, expected_firmware_version, check_passed\nrust, firmware.elf, 741ffaf, true\n"
+        );
+    }
+
+    #[test]
+    fn detects_firmware_identity_bytes_in_elf_payload() {
+        let temp_path = env::temp_dir().join(format!(
+            "obot-bench-debug-identity-{}",
+            std::process::id()
+        ));
+        fs::write(&temp_path, b"prefix 741ffaf suffix").unwrap();
+
+        assert!(elf_contains_bytes(&temp_path, b"741ffaf").unwrap());
+        assert!(!elf_contains_bytes(&temp_path, b"missing").unwrap());
+
+        fs::remove_file(temp_path).unwrap();
     }
 
     #[test]
