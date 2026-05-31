@@ -7,10 +7,9 @@ repository = "git@github.com:bingjeff/obot-rs.git"
 rust-version = "1.95"
 
 [dependencies]
+obot-core = { path = "../../crates/obot-core" }
 obot-protocol = { path = "../../crates/obot-protocol" }
 
-[dev-dependencies]
-obot-core = { path = "../../crates/obot-core" }
 
 [lints.rust]
 unsafe_code = "forbid"

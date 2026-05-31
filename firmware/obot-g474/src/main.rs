@@ -17,7 +17,7 @@ use core::{
 #[cfg(target_os = "none")]
 use obot_core::benchmark::{BenchmarkReport, LoopBenchmark};
 use obot_core::{
-    Controller, Limits,
+    ControlMode, Controller, Limits,
     timing::{LoopScheduler, LoopTiming},
 };
 #[cfg(target_os = "none")]
@@ -39,7 +39,7 @@ use obot_g474::hall::HallInputs;
 #[cfg(target_os = "none")]
 use obot_g474::pwm::SafeZeroPwm;
 #[cfg(target_os = "none")]
-use obot_protocol::BenchmarkPacket;
+use obot_protocol::{BenchmarkPacket, StatusPacket};
 
 #[cfg(target_os = "none")]
 const FAST_LOOP_DT_S: f32 = 1.0 / 50_000.0;
@@ -69,11 +69,13 @@ fn main() {
 
 #[cfg(target_os = "none")]
 fn firmware_main() -> ! {
-    let controller = controller();
+    let mut controller = controller();
     let mut scheduler = scheduler();
     let mut fast_benchmark = LoopBenchmark::new();
     let mut main_benchmark = LoopBenchmark::new();
     let mut benchmark_sequence = 0;
+    let mut status_sequence = 0;
+    let mut command_sequence = 0;
     if clock::configure_170mhz_hsi().is_err() {
         loop {
             core::hint::spin_loop();
@@ -95,6 +97,7 @@ fn firmware_main() -> ! {
     let output_gate = OutputGate::MOTOR_HALL;
     let mut bus_voltage_raw = 0_u16;
     let mut output_allowed = false;
+    let mut command_allows_output = false;
     let hall_angle = HallElectricalAngle::MOTOR_HALL;
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
     foc.current_mode();
@@ -129,12 +132,17 @@ fn firmware_main() -> ! {
 
         if poll.main {
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
+                if let Some(packet) = debug_report::poll_command(&mut command_sequence) {
+                    command_allows_output = apply_host_command(&mut controller, packet.command);
+                }
                 bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
                 output_allowed = update_output_safety(
                     &driver,
+                    command_allows_output,
                     output_gate.allows_output_raw(bus_voltage_raw),
                     controller.state().fault.is_some(),
                 );
+                status_sequence = publish_status_report(status_sequence, controller.state());
                 core::hint::black_box(controller.state());
             });
             benchmark_sequence = publish_benchmark_report(
@@ -151,8 +159,29 @@ fn firmware_main() -> ! {
 
 #[cfg(target_os = "none")]
 #[inline(never)]
+fn apply_host_command(controller: &mut Controller, command: obot_core::MotorCommand) -> bool {
+    let mode = command.mode;
+    let command_accepted = controller.apply(command).is_ok();
+    let command_allows_output = command_accepted && mode != ControlMode::Disabled;
+    core::hint::black_box((command_accepted, command_allows_output));
+    command_allows_output
+}
+
+#[cfg(target_os = "none")]
+fn publish_status_report(sequence: u8, state: obot_core::MotorState) -> u8 {
+    debug_report::publish_status(StatusPacket { sequence, state });
+    core::hint::black_box((
+        debug_report::status_packet_ptr(),
+        debug_report::status_packet_len(),
+    ));
+    sequence.wrapping_add(1)
+}
+
+#[cfg(target_os = "none")]
+#[inline(never)]
 fn update_output_safety(
     driver: &MotorDriverPins,
+    command_allows_output: bool,
     bus_allows_output: bool,
     controller_faulted: bool,
 ) -> bool {
@@ -165,8 +194,12 @@ fn update_output_safety(
 
     let driver_fault_latched = DRIVER_FAULT_LATCHED.load(Ordering::Relaxed);
     let status = OutputSafetyStatus {
-        output_allowed: false,
-        command_blocked: true,
+        output_allowed: command_allows_output
+            && bus_allows_output
+            && driver_status.enabled
+            && !driver_fault_latched
+            && !controller_faulted,
+        command_blocked: !command_allows_output,
         bus_blocked: !bus_allows_output,
         driver_not_enabled: !driver_status.enabled,
         driver_fault_latched,

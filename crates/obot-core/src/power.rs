@@ -90,10 +90,7 @@ mod tests {
             raw: 0,
             volts: 7.99
         }));
-        assert!(gate.allows_output(BusVoltageSample {
-            raw: 0,
-            volts: 8.0
-        }));
+        assert!(gate.allows_output(BusVoltageSample { raw: 0, volts: 8.0 }));
         assert!(gate.allows_output(BusVoltageSample {
             raw: 0,
             volts: 60.0

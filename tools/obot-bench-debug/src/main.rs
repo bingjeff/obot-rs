@@ -4,7 +4,10 @@ use std::{
     process::{Command, ExitCode},
 };
 
-use obot_protocol::{BENCHMARK_PACKET_LEN, BenchmarkPacket};
+use obot_core::{ControlMode, MotorCommand};
+use obot_protocol::{
+    BENCHMARK_PACKET_LEN, BenchmarkPacket, CommandPacket, STATUS_PACKET_LEN, StatusPacket,
+};
 
 const DEFAULT_NAME: &str = "rust_debug";
 const DEFAULT_DEVICE: &str = "STM32G474RE";
@@ -33,7 +36,10 @@ fn run(args: Vec<String>) -> Result<String, String> {
     match command.as_str() {
         "decode-hex" => decode_hex_command(rest),
         "decode-file" => decode_file_command(rest),
+        "decode-status-hex" => decode_status_hex_command(rest),
         "read-jlink" => read_jlink_command(rest),
+        "read-status-jlink" => read_status_jlink_command(rest),
+        "write-command-jlink" => write_command_jlink_command(rest),
         "jlink-script" => jlink_script_command(rest),
         "--help" | "-h" | "help" => Ok(usage()),
         other => Err(format!("unknown command `{other}`")),
@@ -61,9 +67,29 @@ fn decode_file_command(args: &[String]) -> Result<String, String> {
     decode_packet_csv(&bytes)
 }
 
+fn decode_status_hex_command(args: &[String]) -> Result<String, String> {
+    if args.is_empty() {
+        return Err("decode-status-hex requires packet bytes".to_string());
+    }
+
+    let bytes = parse_hex_bytes(&args.join(" "))?;
+    decode_status_csv(&bytes)
+}
+
 fn read_jlink_command(args: &[String]) -> Result<String, String> {
     let options = JlinkOptions::parse(args)?;
-    let script = jlink_script(&options);
+    let bytes = read_jlink_bytes(&options, BENCHMARK_PACKET_LEN)?;
+    decode_packet_csv(&bytes)
+}
+
+fn read_status_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = JlinkOptions::parse(args)?;
+    let bytes = read_jlink_bytes(&options, STATUS_PACKET_LEN)?;
+    decode_status_csv(&bytes)
+}
+
+fn read_jlink_bytes(options: &JlinkOptions, len: usize) -> Result<Vec<u8>, String> {
+    let script = jlink_read_script(options, len);
     let script_path = write_temp_script(&script)?;
     let output = Command::new("JLinkExe")
         .arg("-CommanderScript")
@@ -82,13 +108,60 @@ fn read_jlink_command(args: &[String]) -> Result<String, String> {
         ));
     }
 
-    let bytes = parse_jlink_mem8_output(&stdout, BENCHMARK_PACKET_LEN)?;
-    decode_packet_csv(&bytes)
+    parse_jlink_mem8_output(&stdout, len)
 }
 
 fn jlink_script_command(args: &[String]) -> Result<String, String> {
     let options = JlinkOptions::parse(args)?;
     Ok(jlink_script(&options))
+}
+
+fn write_command_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = CommandWriteOptions::parse(args)?;
+    let packet = CommandPacket {
+        sequence: options.sequence,
+        command: MotorCommand {
+            mode: options.mode,
+            torque_nm: options.torque_nm,
+            velocity_rad_s: options.velocity_rad_s,
+            position_rad: options.position_rad,
+        },
+    };
+    let packet_path = write_temp_binary("obot-command-packet", &packet.encode())?;
+    let sequence_path = write_temp_binary("obot-command-sequence", &[options.sequence])?;
+    let script = format!(
+        "device {}\nif SWD\nspeed {}\nconnect\nloadbin {}, 0x{:08X}\nloadbin {}, 0x{:08X}\nexit\n",
+        options.jlink.device,
+        options.jlink.speed_khz,
+        packet_path.display(),
+        options.packet_address,
+        sequence_path.display(),
+        options.sequence_address,
+    );
+    let script_path = write_temp_script(&script)?;
+    let output = Command::new("JLinkExe")
+        .arg("-CommanderScript")
+        .arg(&script_path)
+        .output()
+        .map_err(|error| format!("failed to run JLinkExe: {error}"));
+    let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&packet_path);
+    let _ = fs::remove_file(&sequence_path);
+    let output = output?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "JLinkExe failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status, stdout, stderr
+        ));
+    }
+
+    Ok(format!(
+        "wrote command sequence {} mode {:?}\n",
+        options.sequence, options.mode
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,9 +210,130 @@ impl JlinkOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CommandWriteOptions {
+    jlink: JlinkOptions,
+    packet_address: u32,
+    sequence_address: u32,
+    sequence: u8,
+    mode: ControlMode,
+    torque_nm: f32,
+    velocity_rad_s: f32,
+    position_rad: f32,
+}
+
+impl CommandWriteOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            jlink: JlinkOptions {
+                address: DEFAULT_ADDRESS,
+                speed_khz: DEFAULT_SPEED_KHZ,
+                device: DEFAULT_DEVICE,
+            },
+            packet_address: 0,
+            sequence_address: 0,
+            sequence: 1,
+            mode: ControlMode::Disabled,
+            torque_nm: 0.0,
+            velocity_rad_s: 0.0,
+            position_rad: 0.0,
+        };
+        let mut packet_address_set = false;
+        let mut sequence_address_set = false;
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--packet-address" => {
+                    index += 1;
+                    options.packet_address = parse_u32_arg(args.get(index), "--packet-address")?;
+                    packet_address_set = true;
+                }
+                "--sequence-address" => {
+                    index += 1;
+                    options.sequence_address =
+                        parse_u32_arg(args.get(index), "--sequence-address")?;
+                    sequence_address_set = true;
+                }
+                "--sequence" => {
+                    index += 1;
+                    let sequence = parse_u32_arg(args.get(index), "--sequence")?;
+                    options.sequence = sequence
+                        .try_into()
+                        .map_err(|_| "--sequence must fit in u8".to_string())?;
+                }
+                "--mode" => {
+                    index += 1;
+                    let mode = args
+                        .get(index)
+                        .ok_or_else(|| "--mode requires a value".to_string())?;
+                    options.mode = parse_control_mode(mode)?;
+                }
+                "--torque" => {
+                    index += 1;
+                    options.torque_nm = parse_f32_arg(args.get(index), "--torque")?;
+                }
+                "--velocity" => {
+                    index += 1;
+                    options.velocity_rad_s = parse_f32_arg(args.get(index), "--velocity")?;
+                }
+                "--position" => {
+                    index += 1;
+                    options.position_rad = parse_f32_arg(args.get(index), "--position")?;
+                }
+                "--speed" => {
+                    index += 1;
+                    options.jlink.speed_khz = parse_u32_arg(args.get(index), "--speed")?;
+                }
+                "--device" => {
+                    index += 1;
+                    let device = args
+                        .get(index)
+                        .ok_or_else(|| "--device requires a value".to_string())?;
+                    if device != DEFAULT_DEVICE {
+                        return Err(format!(
+                            "unsupported device `{device}`; this helper currently supports `{DEFAULT_DEVICE}`"
+                        ));
+                    }
+                }
+                other => return Err(format!("unknown option `{other}`")),
+            }
+            index += 1;
+        }
+
+        if !packet_address_set {
+            return Err("write-command-jlink requires --packet-address".to_string());
+        }
+        if !sequence_address_set {
+            return Err("write-command-jlink requires --sequence-address".to_string());
+        }
+
+        Ok(options)
+    }
+}
+
 fn parse_u32_arg(value: Option<&String>, flag: &str) -> Result<u32, String> {
     let value = value.ok_or_else(|| format!("{flag} requires a value"))?;
     parse_u32(value).ok_or_else(|| format!("invalid {flag} value `{value}`"))
+}
+
+fn parse_f32_arg(value: Option<&String>, flag: &str) -> Result<f32, String> {
+    let value = value.ok_or_else(|| format!("{flag} requires a value"))?;
+    value
+        .parse()
+        .map_err(|_| format!("invalid {flag} value `{value}`"))
+}
+
+fn parse_control_mode(value: &str) -> Result<ControlMode, String> {
+    match value {
+        "disabled" => Ok(ControlMode::Disabled),
+        "torque" => Ok(ControlMode::Torque),
+        "velocity" => Ok(ControlMode::Velocity),
+        "position" => Ok(ControlMode::Position),
+        _ => Err(format!(
+            "invalid --mode `{value}`; expected disabled, torque, velocity, or position"
+        )),
+    }
 }
 
 fn parse_u32(value: &str) -> Option<u32> {
@@ -153,9 +347,13 @@ fn parse_u32(value: &str) -> Option<u32> {
 }
 
 fn jlink_script(options: &JlinkOptions) -> String {
+    jlink_read_script(options, BENCHMARK_PACKET_LEN)
+}
+
+fn jlink_read_script(options: &JlinkOptions, len: usize) -> String {
     format!(
         "device {}\nif SWD\nspeed {}\nconnect\nmem8 0x{:08X} {}\nexit\n",
-        options.device, options.speed_khz, options.address, BENCHMARK_PACKET_LEN
+        options.device, options.speed_khz, options.address, len
     )
 }
 
@@ -169,6 +367,17 @@ fn write_temp_script(script: &str) -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 
+fn write_temp_binary(prefix: &str, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    let path = env::temp_dir().join(format!(
+        "{}-{}-{}.bin",
+        prefix,
+        std::process::id(),
+        monotonic_suffix()
+    ));
+    fs::write(&path, bytes).map_err(|error| format!("failed to write {:?}: {error}", path))?;
+    Ok(path)
+}
+
 fn monotonic_suffix() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -178,6 +387,45 @@ fn monotonic_suffix() -> u128 {
 fn decode_packet_csv(bytes: &[u8]) -> Result<String, String> {
     let packet = decode_packet(bytes)?;
     Ok(format_run_stats_csv(DEFAULT_NAME, packet))
+}
+
+fn decode_status_csv(bytes: &[u8]) -> Result<String, String> {
+    let packet = decode_status_packet(bytes)?;
+    Ok(format_status_csv(DEFAULT_NAME, packet))
+}
+
+fn decode_status_packet(bytes: &[u8]) -> Result<StatusPacket, String> {
+    if bytes.len() != STATUS_PACKET_LEN {
+        return Err(format!(
+            "expected {} status bytes, got {}",
+            STATUS_PACKET_LEN,
+            bytes.len()
+        ));
+    }
+
+    StatusPacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
+}
+
+fn format_status_csv(name: &str, packet: StatusPacket) -> String {
+    format!(
+        "name, sequence, fault, torque_nm, velocity_rad_s, position_rad\n{}, {}, {}, {}, {}, {}\n",
+        name,
+        packet.sequence,
+        format_fault(packet.state.fault),
+        packet.state.torque_nm,
+        packet.state.velocity_rad_s,
+        packet.state.position_rad,
+    )
+}
+
+fn format_fault(fault: Option<obot_core::Fault>) -> &'static str {
+    match fault {
+        None => "none",
+        Some(obot_core::Fault::CommandNotFinite) => "command_not_finite",
+        Some(obot_core::Fault::TorqueLimit) => "torque_limit",
+        Some(obot_core::Fault::VelocityLimit) => "velocity_limit",
+        Some(obot_core::Fault::PositionLimit) => "position_limit",
+    }
 }
 
 fn decode_packet(bytes: &[u8]) -> Result<BenchmarkPacket, String> {
@@ -281,8 +529,8 @@ fn parse_jlink_mem8_output(output: &str, expected_len: usize) -> Result<Vec<u8>,
 
 fn usage() -> String {
     format!(
-        "usage:\n  obot-bench-debug decode-hex <{} packet bytes as hex>\n  obot-bench-debug decode-file <path-to-raw-{}-byte-packet>\n  obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]\n  obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]\n",
-        BENCHMARK_PACKET_LEN, BENCHMARK_PACKET_LEN
+        "usage:\n  obot-bench-debug decode-hex <{} benchmark bytes as hex>\n  obot-bench-debug decode-file <path-to-raw-{}-byte-benchmark-packet>\n  obot-bench-debug decode-status-hex <{} status bytes as hex>\n  obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]\n  obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]\n  obot-bench-debug read-status-jlink --address <status-packet-address> [--speed 4000]\n  obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position] [--torque Nm] [--velocity rad_s] [--position rad]\n",
+        BENCHMARK_PACKET_LEN, BENCHMARK_PACKET_LEN, STATUS_PACKET_LEN
     )
 }
 
@@ -385,5 +633,49 @@ mod tests {
 
         assert!(script.contains("device STM32G474RE\n"));
         assert!(script.contains("mem8 0x20000000 81\n"));
+    }
+
+    #[test]
+    fn formats_status_packet_csv() {
+        let output = format_status_csv(
+            "rust",
+            StatusPacket {
+                sequence: 3,
+                state: obot_core::MotorState {
+                    torque_nm: 1.25,
+                    velocity_rad_s: 0.0,
+                    position_rad: -0.5,
+                    fault: Some(obot_core::Fault::TorqueLimit),
+                },
+            },
+        );
+
+        assert_eq!(
+            output,
+            "name, sequence, fault, torque_nm, velocity_rad_s, position_rad\nrust, 3, torque_limit, 1.25, 0, -0.5\n"
+        );
+    }
+
+    #[test]
+    fn parses_command_write_options() {
+        let options = CommandWriteOptions::parse(&[
+            "--packet-address".to_string(),
+            "0x20000090".to_string(),
+            "--sequence-address".to_string(),
+            "0x2000009e".to_string(),
+            "--sequence".to_string(),
+            "7".to_string(),
+            "--mode".to_string(),
+            "torque".to_string(),
+            "--torque".to_string(),
+            "1.5".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.packet_address, 0x2000_0090);
+        assert_eq!(options.sequence_address, 0x2000_009e);
+        assert_eq!(options.sequence, 7);
+        assert_eq!(options.mode, ControlMode::Torque);
+        assert_eq!(options.torque_nm, 1.5);
     }
 }
