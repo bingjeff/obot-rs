@@ -10,7 +10,10 @@ mod debug_report;
 mod startup;
 
 #[cfg(target_os = "none")]
-use core::panic::PanicInfo;
+use core::{
+    panic::PanicInfo,
+    sync::atomic::{AtomicBool, Ordering},
+};
 #[cfg(target_os = "none")]
 use obot_core::benchmark::{BenchmarkReport, LoopBenchmark};
 use obot_core::{
@@ -22,7 +25,7 @@ use obot_core::{
     current::CurrentCalibration,
     foc::{FocCommand, FocController, FocDesired, FocMeasured, FocParam},
     hall::HallElectricalAngle,
-    output::{OutputSafety, OutputSafetyInputs},
+    output::OutputSafetyStatus,
     power::OutputGate,
 };
 #[cfg(target_os = "none")]
@@ -79,7 +82,6 @@ fn firmware_main() -> ! {
 
     let cycle_counter = DwtCycleCounter::new();
     cycle_counter.enable();
-    let mut output_safety = OutputSafety::new();
     let driver = MotorDriverPins::init_motor_hall_disabled();
     let pwm = SafeZeroPwm::init_motor_hall();
     let mut hall = HallInputs::init_motor_hall();
@@ -129,7 +131,6 @@ fn firmware_main() -> ! {
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
                 bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
                 output_allowed = update_output_safety(
-                    &mut output_safety,
                     &driver,
                     output_gate.allows_output_raw(bus_voltage_raw),
                     controller.state().fault.is_some(),
@@ -151,19 +152,26 @@ fn firmware_main() -> ! {
 #[cfg(target_os = "none")]
 #[inline(never)]
 fn update_output_safety(
-    output_safety: &mut OutputSafety,
     driver: &MotorDriverPins,
     bus_allows_output: bool,
     controller_faulted: bool,
 ) -> bool {
+    static DRIVER_FAULT_LATCHED: AtomicBool = AtomicBool::new(false);
+
     let driver_status = driver.status();
-    let status = output_safety.update(OutputSafetyInputs {
-        command_allows_output: false,
-        bus_allows_output,
-        driver_enabled: driver_status.enabled,
-        driver_faulted: driver_status.faulted,
+    if driver_status.faulted {
+        DRIVER_FAULT_LATCHED.store(true, Ordering::Relaxed);
+    }
+
+    let driver_fault_latched = DRIVER_FAULT_LATCHED.load(Ordering::Relaxed);
+    let status = OutputSafetyStatus {
+        output_allowed: false,
+        command_blocked: true,
+        bus_blocked: !bus_allows_output,
+        driver_not_enabled: !driver_status.enabled,
+        driver_fault_latched,
         controller_faulted,
-    });
+    };
     core::hint::black_box(status);
     status.output_allowed
 }
