@@ -106,8 +106,11 @@ impl LoopBenchmark {
     }
 
     pub fn finish(&mut self, sample: LoopSample, now_cycles: u32) {
-        self.execution
-            .record(now_cycles.wrapping_sub(sample.start_cycles));
+        self.finish_cycles(sample, now_cycles.wrapping_sub(sample.start_cycles));
+    }
+
+    pub fn finish_cycles(&mut self, _sample: LoopSample, execution_cycles: u32) {
+        self.execution.record(execution_cycles);
     }
 
     pub const fn period(self) -> CycleStats {
@@ -254,6 +257,18 @@ mod tests {
         assert_eq!(benchmark.execution().mean_milli_cycles(), 15_000);
         assert_eq!(benchmark.period().samples(), 1);
         assert_eq!(benchmark.period().max_cycles(), 30);
+    }
+
+    #[test]
+    fn loop_benchmark_accepts_explicit_execution_cycles() {
+        let mut benchmark = LoopBenchmark::new();
+
+        let sample = benchmark.start(100);
+        benchmark.finish_cycles(sample, 23);
+
+        assert_eq!(benchmark.execution().samples(), 1);
+        assert_eq!(benchmark.execution().last_cycles(), 23);
+        assert_eq!(benchmark.execution().max_cycles(), 23);
     }
 
     #[test]

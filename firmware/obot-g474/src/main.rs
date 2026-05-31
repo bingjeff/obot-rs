@@ -24,7 +24,7 @@ use obot_core::{
 #[cfg(target_os = "none")]
 use obot_core::{
     current::CurrentCalibration,
-    foc::{FocCommand, FocController, FocMeasured, FocParam, MotorHallFocMap},
+    foc::{FocController, FocParam, MotorHallFocMap},
     hall::HallElectricalAngle,
     host::{HostCommandWatchdog, HostCommandWatchdogStatus},
     output::{OutputSafety, OutputSafetyInputs, OutputSafetyStatus},
@@ -51,6 +51,20 @@ use obot_protocol::{
 
 #[cfg(target_os = "none")]
 const FAST_LOOP_DT_S: f32 = 1.0 / 50_000.0;
+#[cfg(target_os = "none")]
+const FAST_LOOP_PERIOD_CYCLES: u32 = 3_400;
+#[cfg(target_os = "none")]
+const SYSTICK_CSR: *mut u32 = 0xE000_E010 as *mut u32;
+#[cfg(target_os = "none")]
+const SYSTICK_RVR: *mut u32 = 0xE000_E014 as *mut u32;
+#[cfg(target_os = "none")]
+const SYSTICK_CVR: *mut u32 = 0xE000_E018 as *mut u32;
+#[cfg(target_os = "none")]
+const SYSTICK_CSR_ENABLE: u32 = 1 << 0;
+#[cfg(target_os = "none")]
+const SYSTICK_CSR_TICKINT: u32 = 1 << 1;
+#[cfg(target_os = "none")]
+const SYSTICK_CSR_CLKSOURCE_PROCESSOR: u32 = 1 << 2;
 #[cfg(target_os = "none")]
 const HOST_COMMAND_TIMEOUT_MAIN_TICKS: u32 = 1_000;
 #[cfg(target_os = "none")]
@@ -92,7 +106,6 @@ fn main() {
 #[cfg(target_os = "none")]
 fn firmware_main() -> ! {
     let mut scheduler = scheduler();
-    let mut fast_benchmark = LoopBenchmark::new();
     let mut main_benchmark = LoopBenchmark::new();
     let mut benchmark_sequence = 0;
     let mut status_sequence = 0;
@@ -122,13 +135,14 @@ fn firmware_main() -> ! {
     let driver = MotorDriverPins::init_motor_hall_disabled();
     let driver_spi = Drv8323s::init_motor_hall();
     let pwm = SafeZeroPwm::init_motor_hall();
-    let mut hall = HallInputs::init_motor_hall();
+    let hall = HallInputs::init_motor_hall();
     let current_adc = match CurrentAdc::init_motor_hall() {
         Ok(adc) => adc,
         Err(_) => loop {
             core::hint::spin_loop();
         },
     };
+    let bus_voltage_adc = current_adc;
     let current_calibration = CurrentCalibration::MOTOR_HALL;
     let output_gate = OutputGate::MOTOR_HALL;
     let mut bus_voltage_raw = 0_u16;
@@ -141,34 +155,24 @@ fn firmware_main() -> ! {
     usb.connect();
 
     core::hint::black_box(pwm.config());
+    install_fast_loop_context(FastLoopContext::new(
+        cycle_counter,
+        pwm,
+        hall,
+        current_adc,
+        current_calibration,
+        hall_angle,
+        foc,
+        foc_desired,
+        output_allowed,
+    ));
+    start_fast_loop_interrupt();
 
     loop {
         let poll = scheduler.poll(cycle_counter.now());
-        if poll.fast {
-            run_measured_loop(&mut fast_benchmark, &cycle_counter, || {
-                let hall_sample = hall.read_sample();
-                let hall_sincos = hall_angle.sincos_hall_count(hall_sample.hall_count);
-                let currents = current_calibration.convert(current_adc.read_samples());
-                let foc_command = FocCommand {
-                    desired: foc_desired,
-                    measured: FocMeasured {
-                        currents,
-                        motor_electrical_angle: hall_angle.electrical_radians(hall_sample.count),
-                    },
-                };
-                let foc_status =
-                    foc.step_with_sincos(&foc_command, hall_sincos.sin, hall_sincos.cos);
-                let pwm_compares =
-                    pwm.write_gated_voltage_commands_disabled(foc_status.command, output_allowed);
-                core::hint::black_box(foc_status);
-                core::hint::black_box(pwm_compares);
-                core::hint::black_box(output_allowed);
-            });
-        }
-
         if poll.main {
             let mut driver_action_completed = false;
-            run_measured_loop(&mut main_benchmark, &cycle_counter, || {
+            run_preemptible_main_loop(&mut main_benchmark, &cycle_counter, || {
                 let host_poll = service_host_debug(&mut command_sequence);
                 let host_status =
                     update_host_watchdog(&mut host_watchdog, host_poll.command_allows_output);
@@ -189,7 +193,7 @@ fn firmware_main() -> ! {
                     last_driver_report = report;
                     driver_action_completed = true;
                 }
-                bus_voltage_raw = monitor_bus_voltage(&current_adc, output_gate);
+                bus_voltage_raw = monitor_bus_voltage(&bus_voltage_adc, output_gate);
                 bus_voltage_sequence =
                     publish_bus_voltage_report(bus_voltage_sequence, bus_voltage_raw);
                 let output_safety_status = update_output_safety(
@@ -201,9 +205,10 @@ fn firmware_main() -> ! {
                     host_poll.clear_output_safety_faults,
                 );
                 output_allowed = output_safety_status.output_allowed;
+                set_fast_loop_command(foc_desired, output_allowed);
                 output_safety_sequence =
                     publish_output_safety_report(output_safety_sequence, output_safety_status);
-                let bridge_output_status = pwm.bridge_output_status();
+                let bridge_output_status = fast_loop_bridge_output_status();
                 obot_g474::usb::publish_hrtim_output_status(
                     bridge_output_status.disable_status,
                     bridge_output_status.all_disabled,
@@ -225,19 +230,20 @@ fn firmware_main() -> ! {
                 core::hint::black_box((host_poll, host_status, controller_state.fault));
             });
             if driver_action_completed {
-                fast_benchmark = LoopBenchmark::new();
+                reset_fast_loop_benchmark();
                 main_benchmark = LoopBenchmark::new();
                 benchmark_sequence = 0;
                 last_benchmark_report = BenchmarkReport::default();
             } else {
-                last_benchmark_report = BenchmarkReport::from_loops(fast_benchmark, main_benchmark);
+                last_benchmark_report =
+                    BenchmarkReport::from_loops(fast_loop_benchmark(), main_benchmark);
                 obot_g474::usb::publish_text_api_benchmark(last_benchmark_report);
                 benchmark_sequence =
                     publish_benchmark_report(benchmark_sequence, last_benchmark_report);
             }
         }
 
-        if !poll.fast && !poll.main {
+        if !poll.main {
             core::hint::spin_loop();
         }
     }
@@ -261,6 +267,168 @@ unsafe impl Sync for OutputSafetyStorage {}
 #[cfg(target_os = "none")]
 static OUTPUT_SAFETY: OutputSafetyStorage =
     OutputSafetyStorage(UnsafeCell::new(OutputSafety::new()));
+
+#[cfg(target_os = "none")]
+struct FastLoopStorage(UnsafeCell<Option<FastLoopContext>>);
+
+#[cfg(target_os = "none")]
+unsafe impl Sync for FastLoopStorage {}
+
+#[cfg(target_os = "none")]
+static FAST_LOOP: FastLoopStorage = FastLoopStorage(UnsafeCell::new(None));
+
+#[cfg(target_os = "none")]
+struct FastLoopContext {
+    benchmark: LoopBenchmark,
+    cycle_counter: DwtCycleCounter,
+    pwm: SafeZeroPwm,
+    hall: HallInputs,
+    current_adc: CurrentAdc,
+    current_calibration: CurrentCalibration,
+    hall_angle: HallElectricalAngle,
+    foc: FocController,
+    foc_desired: obot_core::foc::FocDesired,
+    output_allowed: bool,
+}
+
+#[cfg(target_os = "none")]
+impl FastLoopContext {
+    fn new(
+        cycle_counter: DwtCycleCounter,
+        pwm: SafeZeroPwm,
+        hall: HallInputs,
+        current_adc: CurrentAdc,
+        current_calibration: CurrentCalibration,
+        hall_angle: HallElectricalAngle,
+        foc: FocController,
+        foc_desired: obot_core::foc::FocDesired,
+        output_allowed: bool,
+    ) -> Self {
+        Self {
+            benchmark: LoopBenchmark::new(),
+            cycle_counter,
+            pwm,
+            hall,
+            current_adc,
+            current_calibration,
+            hall_angle,
+            foc,
+            foc_desired,
+            output_allowed,
+        }
+    }
+
+    fn run(&mut self) {
+        let sample = self.benchmark.start(self.cycle_counter.now());
+        let hall_sample = self.hall.read_sample();
+        let hall_sincos = self.hall_angle.sincos_hall_count(hall_sample.hall_count);
+        let currents = self
+            .current_calibration
+            .convert(self.current_adc.read_samples());
+        let voltage_command = self.foc.step_voltage_command_with_sincos(
+            self.foc_desired,
+            currents,
+            hall_sincos.sin,
+            hall_sincos.cos,
+        );
+        let _ = self
+            .pwm
+            .write_gated_voltage_commands_disabled(voltage_command, self.output_allowed);
+        self.benchmark.finish(sample, self.cycle_counter.now());
+    }
+
+    fn set_command(&mut self, foc_desired: obot_core::foc::FocDesired, output_allowed: bool) {
+        self.foc_desired = foc_desired;
+        self.output_allowed = output_allowed;
+    }
+}
+
+#[cfg(target_os = "none")]
+fn install_fast_loop_context(context: FastLoopContext) {
+    interrupt_free(|| unsafe {
+        *FAST_LOOP.0.get() = Some(context);
+    });
+}
+
+#[cfg(target_os = "none")]
+fn start_fast_loop_interrupt() {
+    unsafe {
+        core::ptr::write_volatile(SYSTICK_RVR, FAST_LOOP_PERIOD_CYCLES - 1);
+        core::ptr::write_volatile(SYSTICK_CVR, 0);
+        core::arch::asm!("dsb", "isb", options(nomem, nostack, preserves_flags));
+        core::ptr::write_volatile(
+            SYSTICK_CSR,
+            SYSTICK_CSR_ENABLE | SYSTICK_CSR_TICKINT | SYSTICK_CSR_CLKSOURCE_PROCESSOR,
+        );
+    }
+}
+
+#[cfg(target_os = "none")]
+fn fast_loop_interrupt() {
+    if let Some(context) = fast_loop_context_mut() {
+        context.run();
+    }
+}
+
+#[cfg(target_os = "none")]
+fn set_fast_loop_command(foc_desired: obot_core::foc::FocDesired, output_allowed: bool) {
+    interrupt_free(|| {
+        if let Some(context) = fast_loop_context_mut() {
+            context.set_command(foc_desired, output_allowed);
+        }
+    });
+}
+
+#[cfg(target_os = "none")]
+fn reset_fast_loop_benchmark() {
+    interrupt_free(|| {
+        if let Some(context) = fast_loop_context_mut() {
+            context.benchmark = LoopBenchmark::new();
+        }
+    });
+}
+
+#[cfg(target_os = "none")]
+fn fast_loop_benchmark() -> LoopBenchmark {
+    interrupt_free(|| {
+        fast_loop_context_mut()
+            .map(|context| context.benchmark)
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(target_os = "none")]
+fn fast_loop_bridge_output_status() -> BridgeOutputStatus {
+    interrupt_free(|| {
+        fast_loop_context_mut()
+            .map(|context| context.pwm.bridge_output_status())
+            .unwrap_or(BridgeOutputStatus {
+                disable_status: 0,
+                all_disabled: false,
+                all_enabled: false,
+            })
+    })
+}
+
+#[cfg(target_os = "none")]
+fn fast_loop_execution_total_cycles() -> u64 {
+    fast_loop_context_mut()
+        .map(|context| context.benchmark.execution().total_cycles())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "none")]
+fn fast_loop_context_mut() -> Option<&'static mut FastLoopContext> {
+    unsafe { (&mut *FAST_LOOP.0.get()).as_mut() }
+}
+
+#[cfg(target_os = "none")]
+fn interrupt_free<R>(work: impl FnOnce() -> R) -> R {
+    unsafe { core::arch::asm!("cpsid i", options(nomem, nostack, preserves_flags)) };
+    let result = work();
+    unsafe { core::arch::asm!("cpsie i", options(nomem, nostack, preserves_flags)) };
+    result
+}
 
 #[cfg(target_os = "none")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -820,16 +988,25 @@ fn monitor_bus_voltage(current_adc: &CurrentAdc, output_gate: OutputGate) -> u16
 }
 
 #[cfg(target_os = "none")]
-fn run_measured_loop(
+fn run_preemptible_main_loop(
     benchmark: &mut LoopBenchmark,
     cycle_counter: &impl CycleCounter,
     work: impl FnOnce(),
 ) {
-    let sample = benchmark.start(cycle_counter.now());
+    let (sample, fast_cycles_before) = interrupt_free(|| {
+        (
+            benchmark.start(cycle_counter.now()),
+            fast_loop_execution_total_cycles(),
+        )
+    });
     work();
-    benchmark.finish(sample, cycle_counter.now());
-    core::hint::black_box(benchmark.execution());
-    core::hint::black_box(benchmark.period());
+    let (now_cycles, fast_cycles_after) =
+        interrupt_free(|| (cycle_counter.now(), fast_loop_execution_total_cycles()));
+    let elapsed_cycles = now_cycles.wrapping_sub(sample.start_cycles());
+    let fast_cycles = fast_cycles_after.saturating_sub(fast_cycles_before);
+    let exclusive_cycles =
+        elapsed_cycles.saturating_sub(fast_cycles.min(elapsed_cycles as u64) as u32);
+    benchmark.finish_cycles(sample, exclusive_cycles);
 }
 
 #[cfg(target_os = "none")]

@@ -250,7 +250,37 @@ impl FocController {
 
     #[inline(always)]
     pub fn step_with_sincos(&mut self, command: &FocCommand, sin_t: f32, cos_t: f32) -> FocStatus {
-        let currents = command.measured.currents;
+        let (measured, voltage_command) =
+            self.step_parts(command.desired, command.measured.currents, sin_t, cos_t);
+        let status = FocStatus {
+            desired: command.desired,
+            measured,
+            command: voltage_command,
+        };
+        self.status = status;
+        status
+    }
+
+    #[inline(always)]
+    pub fn step_voltage_command_with_sincos(
+        &mut self,
+        desired: FocDesired,
+        currents: PhaseCurrents,
+        sin_t: f32,
+        cos_t: f32,
+    ) -> FocVoltages {
+        let (_, voltage_command) = self.step_parts(desired, currents, sin_t, cos_t);
+        voltage_command
+    }
+
+    #[inline(always)]
+    fn step_parts(
+        &mut self,
+        desired: FocDesired,
+        currents: PhaseCurrents,
+        sin_t: f32,
+        cos_t: f32,
+    ) -> (DqCurrents, FocVoltages) {
         let i_alpha = TWO_THIRDS * currents.phase_a
             + NEG_ONE_THIRD * currents.phase_b
             + NEG_ONE_THIRD * currents.phase_c;
@@ -261,9 +291,8 @@ impl FocController {
         let i_d_filtered = self.id_filter.update(i_d);
         let i_q_filtered = self.iq_filter.update(i_q);
 
-        let v_d = self.i_gain * self.pi_d.step(command.desired.i_d, i_d_filtered);
-        let v_q =
-            self.i_gain * self.pi_q.step(command.desired.i_q, i_q_filtered) + command.desired.v_q;
+        let v_d = self.i_gain * self.pi_d.step(desired.i_d, i_d_filtered);
+        let v_q = self.i_gain * self.pi_q.step(desired.i_q, i_q_filtered) + desired.v_q;
 
         let v_alpha = cos_t * v_d + sin_t * v_q;
         let v_beta = -sin_t * v_d + cos_t * v_q;
@@ -271,23 +300,20 @@ impl FocController {
         let v_b = NEG_ONE_THIRD * v_alpha + ONE_OVER_SQRT3 * v_beta;
         let v_c = NEG_ONE_THIRD * v_alpha - ONE_OVER_SQRT3 * v_beta;
 
-        let status = FocStatus {
-            desired: command.desired,
-            measured: DqCurrents {
+        (
+            DqCurrents {
                 i_d,
                 i_q,
                 i_0: currents.phase_a + currents.phase_b + currents.phase_c,
             },
-            command: FocVoltages {
+            FocVoltages {
                 v_a,
                 v_b,
                 v_c,
                 v_d,
                 v_q,
             },
-        };
-        self.status = status;
-        status
+        )
     }
 }
 

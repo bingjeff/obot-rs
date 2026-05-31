@@ -29,7 +29,22 @@ unsafe extern "C" {
 static VECTOR_TABLE: VectorTable = VectorTable {
     initial_stack: INITIAL_STACK,
     reset: Reset,
-    exceptions: [default_handler; 14],
+    exceptions: [
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        default_handler,
+        systick_handler,
+    ],
     irqs_before_usb_lp: [default_handler; 20],
     usb_lp: usb_lp_handler,
 };
@@ -49,6 +64,10 @@ extern "C" fn default_handler() {
 
 extern "C" fn usb_lp_handler() {
     obot_g474::usb::interrupt();
+}
+
+extern "C" fn systick_handler() {
+    super::fast_loop_interrupt();
 }
 
 fn enable_fpu() {

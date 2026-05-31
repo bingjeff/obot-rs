@@ -98,6 +98,7 @@ pub enum CurrentAdcError {
     ReadyTimeout { adc_base: usize },
 }
 
+#[derive(Clone, Copy, Debug, Default)]
 pub struct CurrentAdc;
 
 impl CurrentAdc {
