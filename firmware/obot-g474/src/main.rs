@@ -114,7 +114,6 @@ fn firmware_main() -> ! {
         let poll = scheduler.poll(cycle_counter.now());
         if poll.fast {
             run_measured_loop(&mut fast_benchmark, &cycle_counter, || {
-                pwm.write_zero_voltage();
                 let hall_sample = hall.read_sample();
                 let hall_sincos = hall_angle.sincos_hall_count(hall_sample.hall_count);
                 let currents = current_calibration.convert(current_adc.read_samples());
@@ -127,7 +126,8 @@ fn firmware_main() -> ! {
                 };
                 let foc_status =
                     foc.step_with_sincos(&foc_command, hall_sincos.sin, hall_sincos.cos);
-                let pwm_compares = pwm.compares_from_voltages(foc_status.command);
+                let pwm_compares =
+                    pwm.write_gated_voltage_commands_disabled(foc_status.command, output_allowed);
                 core::hint::black_box(foc_status);
                 core::hint::black_box(pwm_compares);
                 core::hint::black_box(output_allowed);

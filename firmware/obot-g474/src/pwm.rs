@@ -102,6 +102,20 @@ pub struct PhaseCompares {
     pub phase_c: u32,
 }
 
+impl PhaseCompares {
+    pub const fn from_compare(compare: u32) -> Self {
+        Self {
+            phase_a: compare,
+            phase_b: compare,
+            phase_c: compare,
+        }
+    }
+
+    pub const fn zero_voltage() -> Self {
+        Self::from_compare(PWM_ZERO_COMPARE)
+    }
+}
+
 pub struct SafeZeroPwm {
     config: PwmConfig,
 }
@@ -132,11 +146,25 @@ impl SafeZeroPwm {
     #[inline(always)]
     pub fn write_voltage_commands_disabled(&self, command: FocVoltages) -> PhaseCompares {
         let compares = self.compares_from_voltages(command);
-        self.write_phase_compare(TIMER_D, compares.phase_a);
-        self.write_phase_compare(TIMER_F, compares.phase_b);
-        self.write_phase_compare(TIMER_E, compares.phase_c);
+        self.write_phase_compares(compares);
         disable_outputs();
         compares
+    }
+
+    #[inline(always)]
+    pub fn write_gated_voltage_commands_disabled(
+        &self,
+        command: FocVoltages,
+        output_allowed: bool,
+    ) -> PhaseCompares {
+        let commanded_compares = self.compares_from_voltages(command);
+        let applied_compares = if output_allowed {
+            commanded_compares
+        } else {
+            PhaseCompares::zero_voltage()
+        };
+        self.write_phase_compares(applied_compares);
+        commanded_compares
     }
 
     #[inline(always)]
@@ -193,6 +221,13 @@ impl SafeZeroPwm {
     }
 
     #[inline(always)]
+    fn write_phase_compares(&self, compares: PhaseCompares) {
+        self.write_phase_compare(TIMER_D, compares.phase_a);
+        self.write_phase_compare(TIMER_F, compares.phase_b);
+        self.write_phase_compare(TIMER_E, compares.phase_c);
+    }
+
+    #[inline(always)]
     fn write_phase_compare(&self, timer: usize, compare: u32) {
         write(timer_register(timer, HRTIM_CMP1XR), compare);
     }
@@ -213,6 +248,7 @@ fn enable_hrtim_clock() {
     let _ = read(RCC_APB2ENR);
 }
 
+#[inline(always)]
 fn disable_outputs() {
     write(HRTIM_COMMON_ODISR, HRTIM_DISABLE_ALL_OUTPUTS);
 }
@@ -245,6 +281,7 @@ fn deadtime_register(config: PwmConfig) -> u32 {
     (config.deadtime_counts << HRTIM_DTR_DTF_POS) | (config.deadtime_counts << HRTIM_DTR_DTR_POS)
 }
 
+#[inline(always)]
 fn timer_register(timer: usize, offset: usize) -> usize {
     HRTIM_TIMER_BASE + timer * HRTIM_TIMER_STRIDE + offset
 }
@@ -260,6 +297,7 @@ fn read(address: usize) -> u32 {
     unsafe { read_volatile(address as *const u32) }
 }
 
+#[inline(always)]
 fn write(address: usize, value: u32) {
     // SAFETY: The caller passes STM32G474 memory-mapped register addresses.
     // Volatile access is required so register writes are performed as requested.
@@ -284,6 +322,18 @@ mod tests {
         assert_eq!(config.max_compare_counts_i32, 54_335);
         assert_eq!(config.nominal_vbus_v, 12.0);
         assert_eq!(config.counts_per_volt, 54_400.0 / 12.0);
+    }
+
+    #[test]
+    fn zero_voltage_compares_use_centered_pwm() {
+        assert_eq!(
+            PhaseCompares::zero_voltage(),
+            PhaseCompares {
+                phase_a: PwmConfig::MOTOR_HALL_SAFE_ZERO.zero_compare_counts,
+                phase_b: PwmConfig::MOTOR_HALL_SAFE_ZERO.zero_compare_counts,
+                phase_c: PwmConfig::MOTOR_HALL_SAFE_ZERO.zero_compare_counts,
+            }
+        );
     }
 
     #[test]

@@ -1147,3 +1147,81 @@ Current comparison:
 
 The Rust path now includes the earlier motor-control subset, output safety gates, J-Link motor command/status, host-triggered driver command handling, explicit chip-select DRV8323S SPI transactions, and DRV8323S register programming/readback reporting. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not applied to HRTIM, bridge outputs remain disabled, successful DRV8323S configuration requires bus/VM supply that is absent in the current attached hardware state, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
 
+
+
+## 2026-05-31: Safety-Gated HRTIM Compare Writes
+
+Change under test:
+
+- Added a fast-loop path that computes candidate phase compares from the FOC voltage command, then writes either the candidate compares or centered zero-voltage compares into HRTIM based on the cached output-safety gate.
+- HRTIM outputs remain disabled. This increment applies compare register writes only; it does not enable bridge outputs.
+- Avoided a per-cycle `ODISR` write because outputs are disabled at PWM initialization and no Rust path enables them yet. The rejected variant with per-cycle `ODISR` measured about `942` mean fast-loop cycles.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink --address 0x20000020
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-status-jlink --address 0x2000008f
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-driver-jlink --address 0x20000081
+```
+
+Release artifact sizes:
+
+```text
+137752 target/thumbv7em-none-eabihf/release/obot-g474
+ 16884 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+`arm-none-eabi-size`:
+
+```text
+   text   data    bss    dec    hex filename
+  16852     32    132  17016   4278 target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+Exported packet addresses:
+
+```text
+OBOT_BENCHMARK_PACKET                 0x20000020
+OBOT_COMMAND_PACKET                   0x20000071
+OBOT_DRIVER_COMMAND_PACKET            0x2000007f
+OBOT_DRIVER_REPORT_PACKET             0x20000081
+OBOT_STATUS_PACKET                    0x2000008f
+OBOT_BENCHMARK_PACKET_SEQUENCE        0x2000009d
+OBOT_COMMAND_PACKET_SEQUENCE          0x2000009e
+OBOT_DRIVER_COMMAND_PACKET_SEQUENCE   0x2000009f
+OBOT_DRIVER_REPORT_PACKET_SEQUENCE    0x200000a0
+OBOT_STATUS_PACKET_SEQUENCE           0x200000a1
+```
+
+Representative steady-state benchmark:
+
+```text
+rust_debug, 925, 4611, 1081, 17009, 422.937, 3400.266, 1080.883, 16973.164
+```
+
+Status and driver report:
+
+```text
+rust_debug, 218, none, 0, 0, 0
+rust_debug, 0, false, 0x0000, 0x0000, 0x00000000, 0x00000000
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `422.937 cycles = 2.488 us`.
+- Fast-loop max execution: `925 cycles = 5.441 us`; `925 / 3400 = 27.21%` of the nominal fast-loop period, leaving `72.79%` overhead.
+- Main-loop mean execution: `1080.883 cycles = 6.358 us`.
+- Main-loop max execution: `1081 cycles = 6.359 us`; `1081 / 17000 = 6.36%` of the main-loop period, leaving `93.64%` overhead.
+- Combined 100 us max load: `(5 * 925 + 1081) / 17000 = 33.56%`, leaving `66.44%` frame overhead.
+- Combined 100 us mean load: `(5 * 422.937 + 1080.883) / 17000 = 18.80%`, leaving `81.20%` frame overhead.
+
+Current comparison:
+
+The Rust path now includes the earlier motor-control subset, output safety gates, J-Link motor command/status, host-triggered driver command handling, explicit chip-select DRV8323S SPI transactions, DRV8323S register programming/readback reporting, and safety-gated HRTIM compare writes. Bridge outputs remain disabled. It is still not feature-equivalent to C++ `motor_hall`: successful DRV8323S configuration requires bus/VM supply that is absent in the current attached hardware state, USB/motor_util API compatibility is absent, and full safe-mode/fault behavior is not implemented.
