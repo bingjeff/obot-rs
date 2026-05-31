@@ -165,7 +165,6 @@ pub struct FocStatus {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FocController {
-    param: FocParam,
     pi_d: PiController,
     pi_q: PiController,
     id_filter: FirstOrderLowPassFilter,
@@ -176,7 +175,6 @@ pub struct FocController {
 impl FocController {
     pub fn new(param: FocParam, dt: f32) -> Self {
         Self {
-            param,
             pi_d: PiController::new(param.pi_d),
             pi_q: PiController::new(param.pi_q),
             id_filter: FirstOrderLowPassFilter::new(dt, param.current_filter_frequency_hz),
@@ -186,7 +184,6 @@ impl FocController {
     }
 
     pub fn set_param(&mut self, param: FocParam) {
-        self.param = param;
         self.pi_d.set_param(param.pi_d);
         self.pi_q.set_param(param.pi_q);
         self.id_filter
