@@ -962,6 +962,7 @@ struct UsbRunStatsOptions {
 #[derive(Clone, Debug, PartialEq)]
 struct AcceptedProofUsbOptions {
     device_path: Option<PathBuf>,
+    expected_firmware_version: Option<String>,
     samples: usize,
     sequence: u8,
     timeout_ms: u32,
@@ -1177,6 +1178,7 @@ impl AcceptedProofUsbOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut options = Self {
             device_path: None,
+            expected_firmware_version: None,
             samples: 100,
             sequence: 200,
             timeout_ms: DEFAULT_USB_TIMEOUT_MS,
@@ -1214,6 +1216,16 @@ impl AcceptedProofUsbOptions {
                 "--timeout-ms" => {
                     index += 1;
                     options.timeout_ms = parse_u32_arg(args.get(index), "--timeout-ms")?;
+                }
+                "--expect-firmware-version" => {
+                    index += 1;
+                    options.expected_firmware_version = Some(
+                        args.get(index)
+                            .ok_or_else(|| {
+                                "--expect-firmware-version requires a value".to_string()
+                            })?
+                            .to_string(),
+                    );
                 }
                 "--command-poll-timeout-ms" => {
                     index += 1;
@@ -1686,6 +1698,11 @@ fn accepted_proof_usb(options: &AcceptedProofUsbOptions) -> Result<String, Strin
         "firmware_identity",
         &format_firmware_identity_csv(DEFAULT_NAME, &firmware_version),
     );
+    if let Some(expected) = &options.expected_firmware_version {
+        if firmware_version.trim() != expected {
+            return Err(command_failure(output));
+        }
+    }
 
     let driver_result = check_driver_usb(&accepted_proof_driver_options(options))?;
     append_proof_section(
@@ -3716,7 +3733,7 @@ fn usage() -> String {
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
   obot-bench-debug compare-baseline-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
-  obot-bench-debug accepted-proof-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--timeout-ms N] [--command-poll-timeout-ms N] [--command-poll-interval-ms N] [--driver-poll-timeout-ms N] [--driver-poll-interval-ms N]
+  obot-bench-debug accepted-proof-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--sequence N] [--expect-firmware-version VERSION] [--timeout-ms N] [--command-poll-timeout-ms N] [--command-poll-interval-ms N] [--driver-poll-timeout-ms N] [--driver-poll-interval-ms N]
   obot-bench-debug verify-no-heap [--elf target/thumbv7em-none-eabihf/release/obot-g474]
   obot-bench-debug read-status-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <status-packet-address>] [--speed 4000]
   obot-bench-debug read-driver-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address <driver-report-address>] [--speed 4000]
@@ -4323,6 +4340,8 @@ mod tests {
             "180".to_string(),
             "--timeout-ms".to_string(),
             "250".to_string(),
+            "--expect-firmware-version".to_string(),
+            "741ffaf".to_string(),
             "--command-poll-timeout-ms".to_string(),
             "80".to_string(),
             "--command-poll-interval-ms".to_string(),
@@ -4340,6 +4359,7 @@ mod tests {
             options.device_path,
             Some(PathBuf::from("/dev/bus/usb/001/043"))
         );
+        assert_eq!(options.expected_firmware_version, Some("741ffaf".to_string()));
         assert_eq!(options.samples, 64);
         assert_eq!(options.sequence, 180);
         assert_eq!(options.timeout_ms, 250);
@@ -4348,6 +4368,14 @@ mod tests {
         assert_eq!(options.driver_poll_timeout_ms, 2000);
         assert_eq!(options.driver_poll_interval_ms, 25);
         assert_eq!(options.reset_settle_ms, 75);
+    }
+
+    #[test]
+    fn rejects_missing_expected_firmware_version() {
+        let error = AcceptedProofUsbOptions::parse(&["--expect-firmware-version".to_string()])
+            .unwrap_err();
+
+        assert_eq!(error, "--expect-firmware-version requires a value");
     }
 
     #[test]
