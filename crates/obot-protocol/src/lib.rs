@@ -130,6 +130,7 @@ impl StatusPacket {
                 torque_nm: f32::from_le_bytes(bytes[2..6].try_into().unwrap()),
                 velocity_rad_s: f32::from_le_bytes(bytes[6..10].try_into().unwrap()),
                 position_rad: f32::from_le_bytes(bytes[10..14].try_into().unwrap()),
+                mode: ControlMode::Disabled,
             },
         })
     }
@@ -582,6 +583,7 @@ mod tests {
                 torque_nm: 1.0,
                 velocity_rad_s: 2.0,
                 position_rad: 3.0,
+                mode: ControlMode::Disabled,
                 fault: Some(Fault::VelocityLimit),
             },
         };

@@ -24,7 +24,7 @@ use obot_core::{
 #[cfg(target_os = "none")]
 use obot_core::{
     current::CurrentCalibration,
-    foc::{FocCommand, FocController, FocDesired, FocMeasured, FocParam},
+    foc::{FocCommand, FocController, FocMeasured, FocParam, MotorHallFocMap},
     hall::HallElectricalAngle,
     host::{HostCommandWatchdog, HostCommandWatchdogStatus},
     output::{OutputSafety, OutputSafetyInputs, OutputSafetyStatus},
@@ -134,6 +134,8 @@ fn firmware_main() -> ! {
     let mut bus_voltage_raw = 0_u16;
     let mut output_allowed = false;
     let hall_angle = HallElectricalAngle::MOTOR_HALL;
+    let foc_map = MotorHallFocMap::MOTOR_HALL;
+    let mut foc_desired = foc_map.desired_from_state(obot_core::MotorState::default());
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
     foc.current_mode();
     usb.connect();
@@ -148,7 +150,7 @@ fn firmware_main() -> ! {
                 let hall_sincos = hall_angle.sincos_hall_count(hall_sample.hall_count);
                 let currents = current_calibration.convert(current_adc.read_samples());
                 let foc_command = FocCommand {
-                    desired: FocDesired::default(),
+                    desired: foc_desired,
                     measured: FocMeasured {
                         currents,
                         motor_electrical_angle: hall_angle.electrical_radians(hall_sample.count),
@@ -174,6 +176,7 @@ fn firmware_main() -> ! {
                     force_controller_disabled();
                 }
                 let controller_state = controller_storage_mut().state();
+                foc_desired = foc_map.desired_from_state(controller_state);
                 publish_status_report(status_sequence, controller_state);
                 status_sequence = status_sequence.wrapping_add(1);
                 if let Some(report) = service_driver_debug(
@@ -737,10 +740,7 @@ fn apply_host_command(
 
 #[cfg(any(target_os = "none", test))]
 fn mode_allows_output(mode: ControlMode) -> bool {
-    matches!(
-        mode,
-        ControlMode::Torque | ControlMode::Velocity | ControlMode::Position
-    )
+    matches!(mode, ControlMode::Torque)
 }
 
 #[cfg(target_os = "none")]
@@ -853,11 +853,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_closed_loop_modes_allow_output() {
+    fn only_implemented_closed_loop_modes_allow_output() {
         assert!(!mode_allows_output(ControlMode::Disabled));
         assert!(mode_allows_output(ControlMode::Torque));
-        assert!(mode_allows_output(ControlMode::Velocity));
-        assert!(mode_allows_output(ControlMode::Position));
+        assert!(!mode_allows_output(ControlMode::Velocity));
+        assert!(!mode_allows_output(ControlMode::Position));
         assert!(!mode_allows_output(ControlMode::ClearFaults));
     }
 }

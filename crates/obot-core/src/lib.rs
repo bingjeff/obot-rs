@@ -33,6 +33,7 @@ pub struct MotorState {
     pub torque_nm: f32,
     pub velocity_rad_s: f32,
     pub position_rad: f32,
+    pub mode: ControlMode,
     pub fault: Option<Fault>,
 }
 
@@ -77,6 +78,7 @@ impl Controller {
                 torque_nm: 0.0,
                 velocity_rad_s: 0.0,
                 position_rad: 0.0,
+                mode: ControlMode::Disabled,
                 fault: None,
             },
         }
@@ -121,14 +123,17 @@ impl Controller {
             ControlMode::Disabled => MotorState::default(),
             ControlMode::Torque => MotorState {
                 torque_nm: command.torque_nm,
+                mode: ControlMode::Torque,
                 ..MotorState::default()
             },
             ControlMode::Velocity => MotorState {
                 velocity_rad_s: command.velocity_rad_s,
+                mode: ControlMode::Velocity,
                 ..MotorState::default()
             },
             ControlMode::Position => MotorState {
                 position_rad: command.position_rad,
+                mode: ControlMode::Position,
                 ..MotorState::default()
             },
             ControlMode::ClearFaults => unreachable!(),
@@ -173,6 +178,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(state.torque_nm, 1.25);
+        assert_eq!(state.mode, ControlMode::Torque);
         assert_eq!(state.fault, None);
     }
 

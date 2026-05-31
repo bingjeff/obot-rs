@@ -1,4 +1,4 @@
-use crate::current::PhaseCurrents;
+use crate::{ControlMode, MotorState, current::PhaseCurrents};
 
 const TWO_THIRDS: f32 = 2.0 / 3.0;
 const NEG_ONE_THIRD: f32 = -1.0 / 3.0;
@@ -131,6 +131,34 @@ pub struct FocDesired {
     pub i_d: f32,
     pub i_q: f32,
     pub v_q: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotorHallFocMap {
+    pub iq_per_torque_nm: f32,
+    pub max_iq_a: f32,
+}
+
+impl MotorHallFocMap {
+    pub const MOTOR_HALL: Self = Self {
+        iq_per_torque_nm: 1.0,
+        max_iq_a: 1.0,
+    };
+
+    #[inline(always)]
+    pub fn desired_from_state(self, state: MotorState) -> FocDesired {
+        if state.fault.is_some() {
+            return FocDesired::default();
+        }
+
+        match state.mode {
+            ControlMode::Torque => FocDesired {
+                i_q: fsat(state.torque_nm * self.iq_per_torque_nm, self.max_iq_a),
+                ..FocDesired::default()
+            },
+            _ => FocDesired::default(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -306,6 +334,65 @@ mod tests {
         assert_close(pi.ki_sum(), 5.0);
         assert_close(pi.step(-10.0, 0.0), -6.0);
         assert_close(pi.ki_sum(), -5.0);
+    }
+
+    #[test]
+    fn motor_hall_foc_map_converts_torque_to_limited_q_axis_current() {
+        let map = MotorHallFocMap::MOTOR_HALL;
+
+        assert_eq!(
+            map.desired_from_state(MotorState {
+                torque_nm: 0.25,
+                mode: ControlMode::Torque,
+                ..MotorState::default()
+            }),
+            FocDesired {
+                i_q: 0.25,
+                ..FocDesired::default()
+            }
+        );
+        assert_eq!(
+            map.desired_from_state(MotorState {
+                torque_nm: 2.0,
+                mode: ControlMode::Torque,
+                ..MotorState::default()
+            }),
+            FocDesired {
+                i_q: 1.0,
+                ..FocDesired::default()
+            }
+        );
+        assert_eq!(
+            map.desired_from_state(MotorState {
+                torque_nm: 0.25,
+                mode: ControlMode::Torque,
+                fault: Some(crate::Fault::TorqueLimit),
+                ..MotorState::default()
+            }),
+            FocDesired::default()
+        );
+    }
+
+    #[test]
+    fn non_torque_modes_do_not_request_current_until_feedback_controllers_exist() {
+        let map = MotorHallFocMap::MOTOR_HALL;
+
+        assert_eq!(
+            map.desired_from_state(MotorState {
+                velocity_rad_s: 1.0,
+                mode: ControlMode::Velocity,
+                ..MotorState::default()
+            }),
+            FocDesired::default()
+        );
+        assert_eq!(
+            map.desired_from_state(MotorState {
+                position_rad: 1.0,
+                mode: ControlMode::Position,
+                ..MotorState::default()
+            }),
+            FocDesired::default()
+        );
     }
 
     #[test]
