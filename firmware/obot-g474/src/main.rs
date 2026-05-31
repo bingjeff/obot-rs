@@ -26,7 +26,7 @@ use obot_core::{
     current::CurrentCalibration,
     foc::{FocCommand, FocController, FocDesired, FocMeasured, FocParam},
     hall::HallElectricalAngle,
-    output::OutputSafetyStatus,
+    output::{OutputSafety, OutputSafetyInputs},
     power::OutputGate,
 };
 #[cfg(target_os = "none")]
@@ -102,8 +102,6 @@ fn firmware_main() -> ! {
     let output_gate = OutputGate::MOTOR_HALL;
     let mut bus_voltage_raw = 0_u16;
     let mut output_allowed = false;
-    let mut command_allows_output = false;
-    let mut controller_faulted = false;
     let hall_angle = HallElectricalAngle::MOTOR_HALL;
     let mut foc = FocController::new(FocParam::MOTOR_HALL, FAST_LOOP_DT_S);
     foc.current_mode();
@@ -137,7 +135,7 @@ fn firmware_main() -> ! {
         if poll.main {
             let mut driver_action_completed = false;
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
-                (command_allows_output, controller_faulted) =
+                let (command_allows_output, controller_faulted, clear_output_safety_faults) =
                     service_host_debug(&mut command_sequence, status_sequence);
                 status_sequence = status_sequence.wrapping_add(1);
                 driver_action_completed = service_driver_debug(
@@ -153,8 +151,13 @@ fn firmware_main() -> ! {
                     command_allows_output,
                     output_gate.allows_output_raw(bus_voltage_raw),
                     controller_faulted,
+                    clear_output_safety_faults,
                 );
-                core::hint::black_box((command_allows_output, controller_faulted));
+                core::hint::black_box((
+                    command_allows_output,
+                    controller_faulted,
+                    clear_output_safety_faults,
+                ));
             });
             if driver_action_completed {
                 fast_benchmark = LoopBenchmark::new();
@@ -187,12 +190,25 @@ static CONTROLLER: ControllerStorage = ControllerStorage(UnsafeCell::new(Control
 static COMMAND_ALLOWS_OUTPUT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_os = "none")]
+struct OutputSafetyStorage(UnsafeCell<OutputSafety>);
+
+#[cfg(target_os = "none")]
+unsafe impl Sync for OutputSafetyStorage {}
+
+#[cfg(target_os = "none")]
+static OUTPUT_SAFETY: OutputSafetyStorage =
+    OutputSafetyStorage(UnsafeCell::new(OutputSafety::new()));
+
+#[cfg(target_os = "none")]
 #[inline(never)]
-fn service_host_debug(command_sequence: &mut u8, status_sequence: u8) -> (bool, bool) {
+fn service_host_debug(command_sequence: &mut u8, status_sequence: u8) -> (bool, bool, bool) {
     let controller = controller_storage_mut();
+    let mut clear_output_safety_faults = false;
     if let Some(packet) = debug_report::poll_command(command_sequence) {
-        let command_allows_output = apply_host_command(controller, packet.command);
+        let (command_allows_output, clear_faults_accepted) =
+            apply_host_command(controller, packet.command);
         COMMAND_ALLOWS_OUTPUT.store(command_allows_output, Ordering::Relaxed);
+        clear_output_safety_faults = clear_faults_accepted;
     }
 
     let state = controller.state();
@@ -200,6 +216,7 @@ fn service_host_debug(command_sequence: &mut u8, status_sequence: u8) -> (bool, 
     (
         COMMAND_ALLOWS_OUTPUT.load(Ordering::Relaxed),
         state.fault.is_some(),
+        clear_output_safety_faults,
     )
 }
 
@@ -265,6 +282,7 @@ fn publish_driver_report(sequence: u8, report: Drv8323sConfigReport) {
     ));
 }
 
+#[cfg(target_os = "none")]
 fn controller_storage_mut() -> &'static mut Controller {
     // SAFETY: The current firmware is single-threaded at this layer: command
     // polling/status publication happen from the main-loop branch only, and no
@@ -274,16 +292,27 @@ fn controller_storage_mut() -> &'static mut Controller {
 }
 
 #[cfg(target_os = "none")]
-fn apply_host_command(controller: &mut Controller, command: obot_core::MotorCommand) -> bool {
+fn apply_host_command(
+    controller: &mut Controller,
+    command: obot_core::MotorCommand,
+) -> (bool, bool) {
     let mode = command.mode;
     let command_accepted = controller.apply(command).is_ok();
-    let command_allows_output = command_accepted
-        && matches!(
-            mode,
-            ControlMode::Torque | ControlMode::Velocity | ControlMode::Position
-        );
-    core::hint::black_box((command_accepted, command_allows_output));
-    command_allows_output
+    let command_allows_output = command_accepted && mode_allows_output(mode);
+    let clear_faults_accepted = command_accepted && mode == ControlMode::ClearFaults;
+    core::hint::black_box((
+        command_accepted,
+        command_allows_output,
+        clear_faults_accepted,
+    ));
+    (command_allows_output, clear_faults_accepted)
+}
+
+fn mode_allows_output(mode: ControlMode) -> bool {
+    matches!(
+        mode,
+        ControlMode::Torque | ControlMode::Velocity | ControlMode::Position
+    )
 }
 
 #[cfg(target_os = "none")]
@@ -302,29 +331,29 @@ fn update_output_safety(
     command_allows_output: bool,
     bus_allows_output: bool,
     controller_faulted: bool,
+    clear_latched_faults: bool,
 ) -> bool {
-    static DRIVER_FAULT_LATCHED: AtomicBool = AtomicBool::new(false);
-
-    let driver_status = driver.status();
-    if driver_status.faulted {
-        DRIVER_FAULT_LATCHED.store(true, Ordering::Relaxed);
+    let safety = output_safety_storage_mut();
+    if clear_latched_faults {
+        safety.clear_latched_driver_fault();
     }
 
-    let driver_fault_latched = DRIVER_FAULT_LATCHED.load(Ordering::Relaxed);
-    let status = OutputSafetyStatus {
-        output_allowed: command_allows_output
-            && bus_allows_output
-            && driver_status.enabled
-            && !driver_fault_latched
-            && !controller_faulted,
-        command_blocked: !command_allows_output,
-        bus_blocked: !bus_allows_output,
-        driver_not_enabled: !driver_status.enabled,
-        driver_fault_latched,
+    let driver_status = driver.status();
+    let status = safety.update(OutputSafetyInputs {
+        command_allows_output,
+        bus_allows_output,
+        driver_enabled: driver_status.enabled,
+        driver_faulted: driver_status.faulted,
         controller_faulted,
-    };
+    });
     core::hint::black_box(status);
     status.output_allowed
+}
+
+#[cfg(target_os = "none")]
+fn output_safety_storage_mut() -> &'static mut OutputSafety {
+    // SAFETY: Output safety is updated only from the cooperative main-loop branch.
+    unsafe { &mut *OUTPUT_SAFETY.0.get() }
 }
 
 #[cfg(target_os = "none")]
@@ -362,5 +391,19 @@ fn publish_benchmark_report(sequence: u8, report: BenchmarkReport) -> u8 {
 fn panic(_info: &PanicInfo<'_>) -> ! {
     loop {
         core::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_closed_loop_modes_allow_output() {
+        assert!(!mode_allows_output(ControlMode::Disabled));
+        assert!(mode_allows_output(ControlMode::Torque));
+        assert!(mode_allows_output(ControlMode::Velocity));
+        assert!(mode_allows_output(ControlMode::Position));
+        assert!(!mode_allows_output(ControlMode::ClearFaults));
     }
 }
