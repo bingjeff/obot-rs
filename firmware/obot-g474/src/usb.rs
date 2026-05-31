@@ -2,7 +2,10 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use obot_core::benchmark::BenchmarkReport;
-use obot_protocol::usb_control::{self, ControlRequest, ControlResponse, SetupPacket};
+use obot_protocol::{
+    COMMAND_PACKET_LEN, CommandPacket, STATUS_PACKET_LEN, StatusPacket,
+    usb_control::{self, ControlRequest, ControlResponse, SetupPacket},
+};
 
 const RCC_BASE: usize = 0x4002_1000;
 const RCC_APB1RSTR1: usize = RCC_BASE + 0x38;
@@ -118,6 +121,18 @@ static TEXT_RX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static TEXT_RX_UNSUPPORTED: AtomicU32 = AtomicU32::new(0);
 static TEXT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static TEXT_TX_BUSY: AtomicU32 = AtomicU32::new(0);
+static REALTIME_COMMAND_VERSION: AtomicU32 = AtomicU32::new(0);
+static REALTIME_COMMAND_CONSUMED_VERSION: AtomicU32 = AtomicU32::new(0);
+static REALTIME_RX_LAST_LEN: AtomicU8 = AtomicU8::new(0);
+static REALTIME_RX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static REALTIME_RX_ACCEPTED: AtomicU32 = AtomicU32::new(0);
+static REALTIME_RX_UNSUPPORTED: AtomicU32 = AtomicU32::new(0);
+static REALTIME_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static REALTIME_TX_BUSY: AtomicU32 = AtomicU32::new(0);
+static REALTIME_COMMAND_BYTES: [AtomicU8; COMMAND_PACKET_LEN] =
+    [const { AtomicU8::new(0) }; COMMAND_PACKET_LEN];
+static REALTIME_STATUS_BYTES: [AtomicU8; STATUS_PACKET_LEN] =
+    [const { AtomicU8::new(0) }; STATUS_PACKET_LEN];
 static BENCH_T_EXEC_FASTLOOP: AtomicU32 = AtomicU32::new(0);
 static BENCH_T_PERIOD_FASTLOOP: AtomicU32 = AtomicU32::new(0);
 static BENCH_T_EXEC_MAINLOOP: AtomicU32 = AtomicU32::new(0);
@@ -190,6 +205,64 @@ pub fn text_rx_last_len() -> u8 {
 
 pub fn text_tx_last_len() -> u8 {
     TEXT_TX_LAST_LEN.load(Ordering::Relaxed)
+}
+
+pub fn realtime_rx_total() -> u32 {
+    REALTIME_RX_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn realtime_rx_accepted() -> u32 {
+    REALTIME_RX_ACCEPTED.load(Ordering::Relaxed)
+}
+
+pub fn realtime_rx_unsupported() -> u32 {
+    REALTIME_RX_UNSUPPORTED.load(Ordering::Relaxed)
+}
+
+pub fn realtime_tx_total() -> u32 {
+    REALTIME_TX_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn realtime_tx_busy() -> u32 {
+    REALTIME_TX_BUSY.load(Ordering::Relaxed)
+}
+
+pub fn realtime_rx_last_len() -> u8 {
+    REALTIME_RX_LAST_LEN.load(Ordering::Relaxed)
+}
+
+pub fn poll_realtime_command() -> Option<CommandPacket> {
+    let consumed = REALTIME_COMMAND_CONSUMED_VERSION.load(Ordering::Relaxed);
+    let mut version = REALTIME_COMMAND_VERSION.load(Ordering::Acquire);
+    if version == consumed || version & 1 != 0 {
+        return None;
+    }
+
+    for _ in 0..3 {
+        let mut bytes = [0; COMMAND_PACKET_LEN];
+        for (byte, storage) in bytes.iter_mut().zip(REALTIME_COMMAND_BYTES.iter()) {
+            *byte = storage.load(Ordering::Relaxed);
+        }
+        let check = REALTIME_COMMAND_VERSION.load(Ordering::Acquire);
+        if check == version {
+            REALTIME_COMMAND_CONSUMED_VERSION.store(version, Ordering::Release);
+            return CommandPacket::decode(&bytes).ok();
+        }
+
+        version = check;
+        if version == consumed || version & 1 != 0 {
+            return None;
+        }
+    }
+
+    None
+}
+
+pub fn publish_realtime_status(packet: StatusPacket) {
+    let encoded = packet.encode();
+    for (storage, byte) in REALTIME_STATUS_BYTES.iter().zip(encoded) {
+        storage.store(byte, Ordering::Relaxed);
+    }
 }
 
 pub fn publish_text_api_benchmark(report: BenchmarkReport) {
@@ -300,14 +373,53 @@ fn handle_text_endpoint_transfer(istr: u16) {
 }
 
 fn handle_realtime_endpoint_transfer(istr: u16) {
-    if istr & USB_ISTR_DIR != 0 {
-        clear_endpoint_ctr_rx(2);
-        endpoint_set_toggle(2, USB_EP_RX_VALID, USB_EPRX_STAT);
-    }
-
     if read16(endpoint_register(2)) & USB_EP_CTR_TX != 0 {
         clear_endpoint_ctr_tx(2);
     }
+
+    if istr & USB_ISTR_DIR != 0 {
+        clear_endpoint_ctr_rx(2);
+        let byte_count = read_btable(2, BTABLE_COUNT_RX) & USB_COUNT_RX_COUNT_MASK;
+        let len = core::cmp::min(
+            byte_count as usize,
+            usb_control::BULK_MAX_PACKET_SIZE as usize,
+        );
+        REALTIME_RX_LAST_LEN.store(len as u8, Ordering::Relaxed);
+        REALTIME_RX_TOTAL.fetch_add(1, Ordering::Relaxed);
+        let accepted = if len == COMMAND_PACKET_LEN {
+            let mut bytes = [0; COMMAND_PACKET_LEN];
+            read_pma_bytes(EP2_RX_OFFSET, &mut bytes, COMMAND_PACKET_LEN);
+            let version = REALTIME_COMMAND_VERSION.load(Ordering::Relaxed);
+            REALTIME_COMMAND_VERSION.store(version.wrapping_add(1) | 1, Ordering::Release);
+            for (storage, byte) in REALTIME_COMMAND_BYTES.iter().zip(bytes) {
+                storage.store(byte, Ordering::Relaxed);
+            }
+            REALTIME_COMMAND_VERSION.store(version.wrapping_add(2) & !1, Ordering::Release);
+            REALTIME_RX_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            REALTIME_RX_UNSUPPORTED.fetch_add(1, Ordering::Relaxed);
+            false
+        };
+        endpoint_set_toggle(2, USB_EP_RX_VALID, USB_EPRX_STAT);
+        if accepted {
+            send_realtime_status_snapshot();
+        }
+    }
+}
+
+fn send_realtime_status_snapshot() {
+    if tx_active(2) {
+        REALTIME_TX_BUSY.fetch_add(1, Ordering::Relaxed);
+        set_tx_nak(2);
+    }
+
+    let mut encoded = [0; STATUS_PACKET_LEN];
+    for (byte, storage) in encoded.iter_mut().zip(REALTIME_STATUS_BYTES.iter()) {
+        *byte = storage.load(Ordering::Relaxed);
+    }
+    send_data(2, &encoded);
+    REALTIME_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
 const USB_TEXT_API_NAMES: &[&str] = &[
@@ -327,6 +439,12 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "usb_text_tx_busy",
     "usb_text_rx_last_len",
     "usb_text_tx_last_len",
+    "usb_realtime_rx_total",
+    "usb_realtime_rx_accepted",
+    "usb_realtime_rx_unsupported",
+    "usb_realtime_tx_total",
+    "usb_realtime_tx_busy",
+    "usb_realtime_rx_last_len",
 ];
 
 fn send_text_api_response_immediate(request: &[u8]) {
@@ -383,6 +501,12 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
         b"usb_text_tx_busy" => write_u32_decimal(text_tx_busy(), output),
         b"usb_text_rx_last_len" => write_u32_decimal(text_rx_last_len() as u32, output),
         b"usb_text_tx_last_len" => write_u32_decimal(text_tx_last_len() as u32, output),
+        b"usb_realtime_rx_total" => write_u32_decimal(realtime_rx_total(), output),
+        b"usb_realtime_rx_accepted" => write_u32_decimal(realtime_rx_accepted(), output),
+        b"usb_realtime_rx_unsupported" => write_u32_decimal(realtime_rx_unsupported(), output),
+        b"usb_realtime_tx_total" => write_u32_decimal(realtime_tx_total(), output),
+        b"usb_realtime_tx_busy" => write_u32_decimal(realtime_tx_busy(), output),
+        b"usb_realtime_rx_last_len" => write_u32_decimal(realtime_rx_last_len() as u32, output),
         _ => None,
     }
 }
@@ -729,7 +853,7 @@ mod tests {
 
         let mut output = [0; usb_control::BULK_MAX_PACKET_SIZE as usize];
         let len = format_text_api_response(b"api_length", &mut output).unwrap();
-        assert_eq!(&output[..len], b"16");
+        assert_eq!(&output[..len], b"22");
 
         let len = format_text_api_response(b"api_name=4", &mut output).unwrap();
         assert_eq!(&output[..len], b"t_exec_fastloop");

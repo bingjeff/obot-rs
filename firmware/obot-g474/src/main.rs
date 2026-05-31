@@ -244,7 +244,9 @@ struct HostDebugPoll {
 #[cfg(target_os = "none")]
 #[inline(never)]
 fn service_host_debug(command_sequence: &mut u8) -> HostDebugPoll {
-    let Some(packet) = debug_report::poll_command(command_sequence) else {
+    let Some(packet) = obot_g474::usb::poll_realtime_command()
+        .or_else(|| debug_report::poll_command(command_sequence))
+    else {
         return HostDebugPoll::default();
     };
 
@@ -387,6 +389,12 @@ const TEXT_API_NAMES: &[&str] = &[
     "usb_text_tx_busy",
     "usb_text_rx_last_len",
     "usb_text_tx_last_len",
+    "usb_realtime_rx_total",
+    "usb_realtime_rx_accepted",
+    "usb_realtime_rx_unsupported",
+    "usb_realtime_tx_total",
+    "usb_realtime_tx_busy",
+    "usb_realtime_rx_last_len",
 ];
 
 #[cfg(target_os = "none")]
@@ -534,6 +542,12 @@ fn format_firmware_text_api_value<'out>(
         "usb_text_tx_busy" => ApiValue::U32(obot_g474::usb::text_tx_busy()),
         "usb_text_rx_last_len" => ApiValue::U8(obot_g474::usb::text_rx_last_len()),
         "usb_text_tx_last_len" => ApiValue::U8(obot_g474::usb::text_tx_last_len()),
+        "usb_realtime_rx_total" => ApiValue::U32(obot_g474::usb::realtime_rx_total()),
+        "usb_realtime_rx_accepted" => ApiValue::U32(obot_g474::usb::realtime_rx_accepted()),
+        "usb_realtime_rx_unsupported" => ApiValue::U32(obot_g474::usb::realtime_rx_unsupported()),
+        "usb_realtime_tx_total" => ApiValue::U32(obot_g474::usb::realtime_tx_total()),
+        "usb_realtime_tx_busy" => ApiValue::U32(obot_g474::usb::realtime_tx_busy()),
+        "usb_realtime_rx_last_len" => ApiValue::U8(obot_g474::usb::realtime_rx_last_len()),
         _ => return Err(ApiDispatchError::UnknownName),
     };
 
@@ -680,7 +694,9 @@ fn mode_allows_output(mode: ControlMode) -> bool {
 
 #[cfg(target_os = "none")]
 fn publish_status_report(sequence: u8, state: obot_core::MotorState) {
-    debug_report::publish_status(StatusPacket { sequence, state });
+    let packet = StatusPacket { sequence, state };
+    debug_report::publish_status(packet);
+    obot_g474::usb::publish_realtime_status(packet);
     core::hint::black_box((
         debug_report::status_packet_ptr(),
         debug_report::status_packet_len(),
