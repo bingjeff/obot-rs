@@ -51,14 +51,17 @@ impl PiController {
         Self { param, ki_sum: 0.0 }
     }
 
+    #[inline(always)]
     pub fn initialize(&mut self) {
         self.ki_sum = 0.0;
     }
 
+    #[inline(always)]
     pub fn set_param(&mut self, param: PiParam) {
         self.param = param;
     }
 
+    #[inline(always)]
     pub fn step(&mut self, desired: f32, measured: f32) -> f32 {
         let error = desired - measured;
         self.ki_sum = fsat(self.ki_sum + self.param.ki * error, self.param.ki_limit);
@@ -90,17 +93,20 @@ impl FirstOrderLowPassFilter {
         filter
     }
 
+    #[inline(always)]
     pub fn init(&mut self, value: f32) {
         self.value = value;
         self.last_value = value;
     }
 
+    #[inline(always)]
     pub fn update(&mut self, value: f32) -> f32 {
         self.value = self.alpha * value + (1.0 - self.alpha) * self.last_value;
         self.last_value = self.value;
         self.value
     }
 
+    #[inline(always)]
     pub fn set_frequency(&mut self, frequency_hz: f32) {
         if frequency_hz == 0.0 {
             self.alpha = 1.0;
@@ -196,12 +202,14 @@ impl FocController {
             .set_frequency(param.current_filter_frequency_hz);
     }
 
+    #[inline(always)]
     pub fn current_mode(&mut self) {
         self.i_gain = 1.0;
         self.pi_d.initialize();
         self.pi_q.initialize();
     }
 
+    #[inline(always)]
     pub fn voltage_mode(&mut self) {
         self.i_gain = 0.0;
         self.pi_d.initialize();
@@ -212,6 +220,7 @@ impl FocController {
         &self.status
     }
 
+    #[inline(always)]
     pub fn step_with_sincos(&mut self, command: &FocCommand, sin_t: f32, cos_t: f32) -> &FocStatus {
         let currents = command.measured.currents;
         let i_alpha = TWO_THIRDS * currents.phase_a
@@ -253,6 +262,7 @@ impl FocController {
     }
 }
 
+#[inline(always)]
 pub fn fsat(value: f32, saturation: f32) -> f32 {
     let clamped_high = if value > saturation {
         saturation
