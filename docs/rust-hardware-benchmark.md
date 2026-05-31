@@ -105,3 +105,48 @@ Interpretation at 170 MHz:
 Comparison caveat:
 
 This build configures the HRTIM PWM timing surface and writes zero-voltage compare values every fast loop, but it keeps all HRTIM outputs disabled with `ODISR = 0x0FFF`. It still does not include ADC sampling, hall sensor decoding, current control, voltage control, safety/fault handling, or host API parity.
+
+
+## 2026-05-31: Hall GPIO Input Surface, J-Link Debug Readout
+
+Firmware commit: `5cea313 Add hall GPIO readback`
+
+Build and flash steps used:
+
+```sh
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+/home/bingjeff/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objcopy \
+  -O binary \
+  target/thumbv7em-none-eabihf/release/obot-g474 \
+  target/thumbv7em-none-eabihf/release/obot-g474.bin
+JLinkExe -CommanderScript /tmp/obot-rs-flash-bin.jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink
+```
+
+Release artifact sizes:
+
+```text
+133188 target/thumbv7em-none-eabihf/release/obot-g474
+  4660 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+Representative readout after flashing:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 237, 3465, 122, 17009, 118.577, 3399.991, 121.954, 17000.003
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `118.577 cycles = 0.697 us`.
+- Main-loop mean execution: `121.954 cycles = 0.717 us`.
+- Fast-loop mean period: `3399.991 cycles = 20.000 us`.
+- Main-loop mean period: `17000.003 cycles = 100.000 us`.
+- Combined 100 us max safe-zero-PWM-plus-hall load: `(5 * 237 + 122) / 17000 = 7.69%`.
+- Combined 100 us mean safe-zero-PWM-plus-hall load: `(5 * 118.577 + 121.954) / 17000 = 4.20%`.
+- Incremental mean fast-loop cost over safe zero-PWM only: `118.577 - 96.589 = 21.988 cycles = 0.129 us`.
+
+Comparison caveat:
+
+This build configures and reads PA0/PA1/PA2 hall inputs and runs the same hall lookup/wrap logic as the C++ `HallEncoder`. It keeps all HRTIM outputs disabled and still does not include ADC sampling, current control, voltage control, safety/fault handling, or host API parity.
