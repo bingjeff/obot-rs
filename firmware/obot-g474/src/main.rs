@@ -8,13 +8,15 @@ mod startup;
 #[cfg(target_os = "none")]
 use core::panic::PanicInfo;
 #[cfg(target_os = "none")]
-use obot_core::benchmark::LoopBenchmark;
+use obot_core::benchmark::{BenchmarkReport, LoopBenchmark};
 use obot_core::{
     Controller, Limits,
     timing::{LoopScheduler, LoopTiming},
 };
 #[cfg(target_os = "none")]
 use obot_g474::cycle_counter::{CycleCounter, DwtCycleCounter};
+#[cfg(target_os = "none")]
+use obot_protocol::BenchmarkPacket;
 
 const LIMITS: Limits = Limits {
     max_torque_nm: 2.0,
@@ -45,6 +47,7 @@ fn firmware_main() -> ! {
     let mut scheduler = scheduler();
     let mut fast_benchmark = LoopBenchmark::new();
     let mut main_benchmark = LoopBenchmark::new();
+    let mut benchmark_sequence = 0;
     let cycle_counter = DwtCycleCounter::new();
     cycle_counter.enable();
 
@@ -62,6 +65,10 @@ fn firmware_main() -> ! {
             run_measured_loop(&mut main_benchmark, &cycle_counter, || {
                 core::hint::black_box(controller.state());
             });
+            benchmark_sequence = publish_benchmark_report(
+                benchmark_sequence,
+                BenchmarkReport::from_loops(fast_benchmark, main_benchmark),
+            );
         }
 
         if !poll.fast && !poll.main {
@@ -81,6 +88,13 @@ fn run_measured_loop(
     benchmark.finish(sample, cycle_counter.now());
     core::hint::black_box(benchmark.execution());
     core::hint::black_box(benchmark.period());
+}
+
+#[cfg(target_os = "none")]
+fn publish_benchmark_report(sequence: u8, report: BenchmarkReport) -> u8 {
+    let packet = BenchmarkPacket { sequence, report };
+    core::hint::black_box(packet.encode());
+    sequence.wrapping_add(1)
 }
 
 #[cfg(target_os = "none")]

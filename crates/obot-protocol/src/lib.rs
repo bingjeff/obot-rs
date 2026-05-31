@@ -1,9 +1,13 @@
 #![no_std]
 
-use obot_core::{ControlMode, Fault, MotorCommand, MotorState};
+use obot_core::{
+    ControlMode, Fault, MotorCommand, MotorState,
+    benchmark::{BenchmarkReport, CycleStatsSnapshot, LoopBenchmarkSnapshot},
+};
 
 pub const COMMAND_PACKET_LEN: usize = 14;
 pub const STATUS_PACKET_LEN: usize = 14;
+pub const BENCHMARK_PACKET_LEN: usize = 65;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodeError {
@@ -76,6 +80,84 @@ impl StatusPacket {
             },
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BenchmarkPacket {
+    pub sequence: u8,
+    pub report: BenchmarkReport,
+}
+
+impl BenchmarkPacket {
+    pub fn encode(self) -> [u8; BENCHMARK_PACKET_LEN] {
+        let mut out = [0; BENCHMARK_PACKET_LEN];
+        out[0] = self.sequence;
+        let mut offset = 1;
+        offset = encode_loop_snapshot(&mut out, offset, self.report.fast);
+        encode_loop_snapshot(&mut out, offset, self.report.main);
+        out
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let bytes: &[u8; BENCHMARK_PACKET_LEN] =
+            input.try_into().map_err(|_| DecodeError::InvalidLength)?;
+        let mut offset = 1;
+        let (fast, next_offset) = decode_loop_snapshot(bytes, offset);
+        offset = next_offset;
+        let (main, _) = decode_loop_snapshot(bytes, offset);
+
+        Ok(Self {
+            sequence: bytes[0],
+            report: BenchmarkReport { fast, main },
+        })
+    }
+}
+
+fn encode_loop_snapshot(
+    out: &mut [u8; BENCHMARK_PACKET_LEN],
+    offset: usize,
+    snapshot: LoopBenchmarkSnapshot,
+) -> usize {
+    let offset = encode_stats_snapshot(out, offset, snapshot.period);
+    encode_stats_snapshot(out, offset, snapshot.execution)
+}
+
+fn encode_stats_snapshot(
+    out: &mut [u8; BENCHMARK_PACKET_LEN],
+    offset: usize,
+    snapshot: CycleStatsSnapshot,
+) -> usize {
+    out[offset..offset + 4].copy_from_slice(&snapshot.samples.to_le_bytes());
+    out[offset + 4..offset + 8].copy_from_slice(&snapshot.max_cycles.to_le_bytes());
+    out[offset + 8..offset + 16].copy_from_slice(&snapshot.mean_milli_cycles.to_le_bytes());
+    offset + 16
+}
+
+fn decode_loop_snapshot(
+    input: &[u8; BENCHMARK_PACKET_LEN],
+    offset: usize,
+) -> (LoopBenchmarkSnapshot, usize) {
+    let (period, offset) = decode_stats_snapshot(input, offset);
+    let (execution, offset) = decode_stats_snapshot(input, offset);
+    (LoopBenchmarkSnapshot { period, execution }, offset)
+}
+
+fn decode_stats_snapshot(
+    input: &[u8; BENCHMARK_PACKET_LEN],
+    offset: usize,
+) -> (CycleStatsSnapshot, usize) {
+    let samples = u32::from_le_bytes(input[offset..offset + 4].try_into().unwrap());
+    let max_cycles = u32::from_le_bytes(input[offset + 4..offset + 8].try_into().unwrap());
+    let mean_milli_cycles = u64::from_le_bytes(input[offset + 8..offset + 16].try_into().unwrap());
+
+    (
+        CycleStatsSnapshot {
+            samples,
+            max_cycles,
+            mean_milli_cycles,
+        },
+        offset + 16,
+    )
 }
 
 const fn mode_to_u8(mode: ControlMode) -> u8 {
@@ -164,5 +246,40 @@ mod tests {
             CommandPacket::decode(&bytes).unwrap_err(),
             DecodeError::InvalidMode
         );
+    }
+
+    #[test]
+    fn benchmark_packet_round_trips() {
+        let packet = BenchmarkPacket {
+            sequence: 9,
+            report: BenchmarkReport {
+                fast: LoopBenchmarkSnapshot {
+                    period: CycleStatsSnapshot {
+                        samples: 10,
+                        max_cycles: 3_416,
+                        mean_milli_cycles: 3_397_560,
+                    },
+                    execution: CycleStatsSnapshot {
+                        samples: 11,
+                        max_cycles: 710,
+                        mean_milli_cycles: 708_965,
+                    },
+                },
+                main: LoopBenchmarkSnapshot {
+                    period: CycleStatsSnapshot {
+                        samples: 12,
+                        max_cycles: 17_045,
+                        mean_milli_cycles: 16_999_800,
+                    },
+                    execution: CycleStatsSnapshot {
+                        samples: 13,
+                        max_cycles: 6_445,
+                        mean_milli_cycles: 3_555_490,
+                    },
+                },
+            },
+        };
+
+        assert_eq!(BenchmarkPacket::decode(&packet.encode()).unwrap(), packet);
     }
 }

@@ -39,6 +39,21 @@ impl CycleStats {
 
         self.total_cycles.saturating_mul(1_000) / self.samples as u64
     }
+
+    pub const fn snapshot(self) -> CycleStatsSnapshot {
+        CycleStatsSnapshot {
+            samples: self.samples,
+            max_cycles: self.max_cycles,
+            mean_milli_cycles: self.mean_milli_cycles(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CycleStatsSnapshot {
+    pub samples: u32,
+    pub max_cycles: u32,
+    pub mean_milli_cycles: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,6 +108,66 @@ impl LoopBenchmark {
     pub const fn execution(self) -> CycleStats {
         self.execution
     }
+
+    pub const fn snapshot(self) -> LoopBenchmarkSnapshot {
+        LoopBenchmarkSnapshot {
+            period: self.period.snapshot(),
+            execution: self.execution.snapshot(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LoopBenchmarkSnapshot {
+    pub period: CycleStatsSnapshot,
+    pub execution: CycleStatsSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BenchmarkReport {
+    pub fast: LoopBenchmarkSnapshot,
+    pub main: LoopBenchmarkSnapshot,
+}
+
+impl BenchmarkReport {
+    pub const fn from_loops(fast: LoopBenchmark, main: LoopBenchmark) -> Self {
+        Self {
+            fast: fast.snapshot(),
+            main: main.snapshot(),
+        }
+    }
+
+    pub const fn mean_fast_loop_period_milli_cycles(self) -> u64 {
+        self.fast.period.mean_milli_cycles
+    }
+
+    pub const fn max_fast_loop_period_cycles(self) -> u32 {
+        self.fast.period.max_cycles
+    }
+
+    pub const fn mean_fast_loop_cycles_milli_cycles(self) -> u64 {
+        self.fast.execution.mean_milli_cycles
+    }
+
+    pub const fn max_fast_loop_cycles(self) -> u32 {
+        self.fast.execution.max_cycles
+    }
+
+    pub const fn mean_main_loop_period_milli_cycles(self) -> u64 {
+        self.main.period.mean_milli_cycles
+    }
+
+    pub const fn max_main_loop_period_cycles(self) -> u32 {
+        self.main.period.max_cycles
+    }
+
+    pub const fn mean_main_loop_cycles_milli_cycles(self) -> u64 {
+        self.main.execution.mean_milli_cycles
+    }
+
+    pub const fn max_main_loop_cycles(self) -> u32 {
+        self.main.execution.max_cycles
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +187,14 @@ mod tests {
         assert_eq!(stats.max_cycles(), 10);
         assert_eq!(stats.total_cycles(), 17);
         assert_eq!(stats.mean_milli_cycles(), 8_500);
+        assert_eq!(
+            stats.snapshot(),
+            CycleStatsSnapshot {
+                samples: 2,
+                max_cycles: 10,
+                mean_milli_cycles: 8_500,
+            }
+        );
     }
 
     #[test]
@@ -144,5 +227,30 @@ mod tests {
         assert_eq!(benchmark.execution().mean_milli_cycles(), 15_000);
         assert_eq!(benchmark.period().samples(), 1);
         assert_eq!(benchmark.period().max_cycles(), 30);
+    }
+
+    #[test]
+    fn benchmark_report_exposes_script_comparable_fields() {
+        let mut fast = LoopBenchmark::new();
+        let mut main = LoopBenchmark::new();
+
+        let fast_sample = fast.start(100);
+        fast.finish(fast_sample, 810);
+        fast.start(3_500);
+
+        let main_sample = main.start(1_000);
+        main.finish(main_sample, 4_555);
+        main.start(18_000);
+
+        let report = BenchmarkReport::from_loops(fast, main);
+
+        assert_eq!(report.max_fast_loop_cycles(), 710);
+        assert_eq!(report.mean_fast_loop_cycles_milli_cycles(), 710_000);
+        assert_eq!(report.max_fast_loop_period_cycles(), 3_400);
+        assert_eq!(report.mean_fast_loop_period_milli_cycles(), 3_400_000);
+        assert_eq!(report.max_main_loop_cycles(), 3_555);
+        assert_eq!(report.mean_main_loop_cycles_milli_cycles(), 3_555_000);
+        assert_eq!(report.max_main_loop_period_cycles(), 17_000);
+        assert_eq!(report.mean_main_loop_period_milli_cycles(), 17_000_000);
     }
 }
