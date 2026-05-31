@@ -1,6 +1,6 @@
 use std::{
     env, fs, io,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
 
@@ -15,6 +15,8 @@ const DEFAULT_NAME: &str = "rust_debug";
 const DEFAULT_DEVICE: &str = "STM32G474RE";
 const DEFAULT_ADDRESS: u32 = 0x2000_0000;
 const DEFAULT_SPEED_KHZ: u32 = 4_000;
+const DEFAULT_ELF_PATH: &str = "target/thumbv7em-none-eabihf/release/obot-g474";
+const BENCHMARK_PACKET_SYMBOL: &str = "OBOT_BENCHMARK_PACKET";
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -44,6 +46,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "decode-driver-hex" => decode_driver_hex_command(rest),
         "read-jlink" => read_jlink_command(rest),
         "read-jlink-detail" => read_jlink_detail_command(rest),
+        "run-stats-jlink" => run_stats_jlink_command(rest),
         "read-status-jlink" => read_status_jlink_command(rest),
         "read-driver-jlink" => read_driver_jlink_command(rest),
         "write-command-jlink" => write_command_jlink_command(rest),
@@ -124,6 +127,13 @@ fn read_jlink_detail_command(args: &[String]) -> Result<String, String> {
     let options = JlinkOptions::parse(args)?;
     let bytes = read_jlink_bytes(&options, BENCHMARK_PACKET_LEN)?;
     decode_packet_detail_csv(&bytes)
+}
+
+fn run_stats_jlink_command(args: &[String]) -> Result<String, String> {
+    let options = SymbolReadOptions::parse(args)?;
+    let jlink = options.resolve(BENCHMARK_PACKET_SYMBOL)?;
+    let bytes = read_jlink_bytes(&jlink, BENCHMARK_PACKET_LEN)?;
+    decode_packet_csv(&bytes)
 }
 
 fn read_status_jlink_command(args: &[String]) -> Result<String, String> {
@@ -284,6 +294,76 @@ impl JlinkOptions {
         }
 
         Ok(options)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SymbolReadOptions {
+    jlink: JlinkOptions,
+    address: Option<u32>,
+    elf_path: PathBuf,
+}
+
+impl SymbolReadOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut options = Self {
+            jlink: JlinkOptions {
+                address: DEFAULT_ADDRESS,
+                speed_khz: DEFAULT_SPEED_KHZ,
+                device: DEFAULT_DEVICE,
+            },
+            address: None,
+            elf_path: PathBuf::from(DEFAULT_ELF_PATH),
+        };
+
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--address" => {
+                    index += 1;
+                    options.address = Some(parse_u32_arg(args.get(index), "--address")?);
+                }
+                "--elf" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--elf requires a value".to_string())?;
+                    options.elf_path = PathBuf::from(path);
+                }
+                "--speed" => {
+                    index += 1;
+                    options.jlink.speed_khz = parse_u32_arg(args.get(index), "--speed")?;
+                }
+                "--device" => {
+                    index += 1;
+                    let device = args
+                        .get(index)
+                        .ok_or_else(|| "--device requires a value".to_string())?;
+                    if device != DEFAULT_DEVICE {
+                        return Err(format!(
+                            "unsupported device `{device}`; this helper currently supports `{DEFAULT_DEVICE}`"
+                        ));
+                    }
+                }
+                other => return Err(format!("unknown option `{other}`")),
+            }
+            index += 1;
+        }
+
+        Ok(options)
+    }
+
+    fn resolve(&self, symbol: &str) -> Result<JlinkOptions, String> {
+        let address = match self.address {
+            Some(address) => address,
+            None => resolve_symbol_address(&self.elf_path, symbol)?,
+        };
+
+        Ok(JlinkOptions {
+            address,
+            speed_khz: self.jlink.speed_khz,
+            device: self.jlink.device,
+        })
     }
 }
 
@@ -515,6 +595,91 @@ fn parse_u32(value: &str) -> Option<u32> {
             || value.parse().ok(),
             |hex| u32::from_str_radix(hex, 16).ok(),
         )
+}
+
+fn resolve_symbol_address(path: &Path, symbol: &str) -> Result<u32, String> {
+    let output = run_llvm_nm(path)?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "llvm-nm failed for `{}` with status {}\nstdout:\n{}\nstderr:\n{}",
+            path.display(),
+            output.status,
+            stdout,
+            stderr
+        ));
+    }
+
+    parse_nm_symbol_address(&stdout, symbol)
+        .ok_or_else(|| format!("symbol `{symbol}` not found in `{}`", path.display()))
+}
+
+fn run_llvm_nm(path: &Path) -> Result<std::process::Output, String> {
+    match Command::new("llvm-nm").arg(path).output() {
+        Ok(output) => Ok(output),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let tool = find_rust_tool("llvm-nm")?;
+            Command::new(&tool).arg(path).output().map_err(|error| {
+                format!(
+                    "failed to run `{}` for `{}`: {error}; pass --address to avoid symbol lookup",
+                    tool.display(),
+                    path.display()
+                )
+            })
+        }
+        Err(error) => Err(format!(
+            "failed to run llvm-nm for `{}`: {error}; pass --address to avoid symbol lookup",
+            path.display()
+        )),
+    }
+}
+
+fn find_rust_tool(name: &str) -> Result<PathBuf, String> {
+    let output = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .map_err(|error| format!("failed to run rustc --print sysroot: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "rustc --print sysroot failed with status {}",
+            output.status
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rustlib = Path::new(stdout.trim()).join("lib/rustlib");
+    let entries = fs::read_dir(&rustlib)
+        .map_err(|error| format!("failed to read `{}`: {error}", rustlib.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!("failed to inspect `{}` entry: {error}", rustlib.display())
+        })?;
+        let candidate = entry.path().join("bin").join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!("could not find `{name}` under `{}`", rustlib.display()))
+}
+
+fn parse_nm_symbol_address(output: &str, symbol: &str) -> Option<u32> {
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(address) = fields.next() else {
+            continue;
+        };
+        let _kind = fields.next();
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        if name == symbol {
+            return u32::from_str_radix(address, 16).ok();
+        }
+    }
+    None
 }
 
 fn jlink_script(options: &JlinkOptions) -> String {
@@ -794,6 +959,7 @@ fn usage() -> String {
   obot-bench-debug jlink-script [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
+  obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
   obot-bench-debug read-status-jlink --address <status-packet-address> [--speed 4000]
   obot-bench-debug read-driver-jlink --address <driver-report-address> [--speed 4000]
   obot-bench-debug write-command-jlink --packet-address <command-packet-address> --sequence-address <command-sequence-address> [--sequence N] [--mode disabled|torque|velocity|position] [--torque Nm] [--velocity rad_s] [--position rad]
@@ -917,6 +1083,47 @@ mod tests {
 
         assert!(script.contains("device STM32G474RE\n"));
         assert!(script.contains("mem8 0x20000000 81\n"));
+    }
+
+    #[test]
+    fn parses_nm_symbol_address() {
+        let output = "\
+08000000 T Reset\n20000020 B OBOT_BENCHMARK_PACKET\n20000071 B OBOT_COMMAND_PACKET\n";
+
+        assert_eq!(
+            parse_nm_symbol_address(output, BENCHMARK_PACKET_SYMBOL),
+            Some(0x2000_0020)
+        );
+    }
+
+    #[test]
+    fn parses_symbol_read_options() {
+        let options = SymbolReadOptions::parse(&[
+            "--elf".to_string(),
+            "target/custom.elf".to_string(),
+            "--speed".to_string(),
+            "1000".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.address, None);
+        assert_eq!(options.elf_path, PathBuf::from("target/custom.elf"));
+        assert_eq!(options.jlink.speed_khz, 1_000);
+    }
+
+    #[test]
+    fn explicit_symbol_read_address_overrides_elf_lookup() {
+        let options = SymbolReadOptions::parse(&[
+            "--address".to_string(),
+            "0x20000020".to_string(),
+            "--elf".to_string(),
+            "does-not-need-to-exist".to_string(),
+        ])
+        .unwrap();
+
+        let jlink = options.resolve(BENCHMARK_PACKET_SYMBOL).unwrap();
+
+        assert_eq!(jlink.address, 0x2000_0020);
     }
 
     #[test]

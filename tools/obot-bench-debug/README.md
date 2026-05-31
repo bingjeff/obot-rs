@@ -2,16 +2,22 @@
 
 Host helper for decoding the Rust firmware benchmark packet exported at `OBOT_BENCHMARK_PACKET`.
 
-The Rust firmware currently exports the packet at `0x20000000` and updates it once per main-loop tick. With a J-Link attached, read and decode it with:
+The Rust firmware exports the benchmark packet as `OBOT_BENCHMARK_PACKET` and updates it once per main-loop tick. With a J-Link attached, read and decode it through the built ELF symbol table with:
 
 ```sh
-cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- run-stats-jlink --elf target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+For a one-off read against a known packet address, use:
+
+```sh
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- read-jlink --address 0x20000020
 ```
 
 To inspect the generated J-Link command script without touching hardware:
 
 ```sh
-cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- jlink-script
+cargo run --manifest-path tools/obot-bench-debug/Cargo.toml -- jlink-script --address 0x20000020
 ```
 
 The decoded output is shaped like `motor_util --run-stats`:
