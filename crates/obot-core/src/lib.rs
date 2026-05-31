@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod benchmark;
 pub mod timing;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

@@ -7,6 +7,8 @@ mod startup;
 
 #[cfg(target_os = "none")]
 use core::panic::PanicInfo;
+#[cfg(target_os = "none")]
+use obot_core::benchmark::LoopBenchmark;
 use obot_core::{
     Controller, Limits,
     timing::{LoopScheduler, LoopTiming},
@@ -41,6 +43,8 @@ fn main() {
 fn firmware_main() -> ! {
     let controller = controller();
     let mut scheduler = scheduler();
+    let mut fast_benchmark = LoopBenchmark::new();
+    let mut main_benchmark = LoopBenchmark::new();
     let cycle_counter = DwtCycleCounter::new();
     cycle_counter.enable();
 
@@ -48,10 +52,35 @@ fn firmware_main() -> ! {
 
     loop {
         let poll = scheduler.poll(cycle_counter.now());
+        if poll.fast {
+            run_measured_loop(&mut fast_benchmark, &cycle_counter, || {
+                core::hint::black_box(controller.state());
+            });
+        }
+
+        if poll.main {
+            run_measured_loop(&mut main_benchmark, &cycle_counter, || {
+                core::hint::black_box(controller.state());
+            });
+        }
+
         if !poll.fast && !poll.main {
             core::hint::spin_loop();
         }
     }
+}
+
+#[cfg(target_os = "none")]
+fn run_measured_loop(
+    benchmark: &mut LoopBenchmark,
+    cycle_counter: &impl CycleCounter,
+    work: impl FnOnce(),
+) {
+    let sample = benchmark.start(cycle_counter.now());
+    work();
+    benchmark.finish(sample, cycle_counter.now());
+    core::hint::black_box(benchmark.execution());
+    core::hint::black_box(benchmark.period());
 }
 
 #[cfg(target_os = "none")]
