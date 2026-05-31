@@ -688,3 +688,74 @@ Current comparison:
 This Rust path now includes live hall-derived electrical angle, current conversion, FOC transforms, current filtering, PI current control, voltage command generation, candidate PWM compare computation, ADC1 bus-voltage monitoring, and a cached fast-loop output-gate decision. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not yet applied to HRTIM, bridge outputs remain disabled, live host commands are absent, driver fault handling is absent, and full safe-mode/fault behavior is not implemented.
 
 The current Rust fast-loop mean remains below the recorded C++ no-voltage `motor_hall` fast-loop mean (`436.896` cycles Rust versus `708.965` cycles C++), and Rust combined mean load remains below C++ (`14.43%` versus `41.77%`). Rust combined max load is also below C++ (`28.85%` versus `58.79%`), but the Rust max fast-loop sample remains higher than the C++ fast-loop max (`927` cycles Rust versus `710` cycles C++), so max-latency variance remains a tracking item.
+
+
+
+## 2026-05-31: Output Safety State And Driver Fault Pins, J-Link Debug Readout
+
+Firmware commits:
+
+- `c8b35b1 Add output safety and driver pins`
+- `32981a1 Cache output safety for fast loop`
+- `687d6d3 Keep output safety latch off stack`
+
+Change under test:
+
+- Added a core `OutputSafety` state machine with latching driver-fault behavior.
+- Added G474 motor driver pins for active `motor_hall` hardware: PC13 driver enable output initialized disabled, and PC14 active-low driver fault input with pull-up.
+- The firmware samples driver pins and updates the output safety latch in the 10 kHz main loop, then uses a cached output-allowed decision in the 50 kHz fast loop.
+- `command_allows_output` remains hard-coded false until the host command path exists, so outputs remain disabled and PWM continues to write zero voltage.
+
+Verified commands:
+
+```sh
+cargo test --workspace
+cargo check -p obot-g474 --target thumbv7em-none-eabihf
+cargo build -p obot-g474 --release --target thumbv7em-none-eabihf
+cargo clippy --workspace --target thumbv7em-none-eabihf -- -D warnings
+cargo clippy --manifest-path tools/obot-bench-debug/Cargo.toml -- -D warnings
+```
+
+Diagnostic readouts during this increment:
+
+```text
+Driver pins plus safety update in fast loop: rust_debug, 1019, 3733, 269, 17001, 1017.772, 3395.832, 268.515, 16868.855
+Cached safety with latch on stack:           rust_debug, 918, 3705, 419, 17852, 899.523, 3397.293, 416.327, 16910.282
+Cached safety with static latch:             rust_debug, 924, 3711, 408, 17009, 433.885, 3397.309, 407.614, 16907.536
+```
+
+Release artifact sizes for current best:
+
+```text
+136064 target/thumbv7em-none-eabihf/release/obot-g474
+ 14060 target/thumbv7em-none-eabihf/release/obot-g474.bin
+```
+
+`arm-none-eabi-size` for current best:
+
+```text
+   text   data    bss    dec    hex filename
+  14060      0     84  14144   3740 target/thumbv7em-none-eabihf/release/obot-g474
+```
+
+Representative readout after flashing current best:
+
+```text
+name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period
+rust_debug, 924, 3711, 408, 17009, 433.885, 3397.309, 407.614, 16907.536
+```
+
+Interpretation at 170 MHz:
+
+- Fast-loop mean execution: `433.885 cycles = 2.552 us`.
+- Main-loop mean execution: `407.614 cycles = 2.398 us`.
+- Combined 100 us max load: `(5 * 924 + 408) / 17000 = 29.58%`.
+- Combined 100 us mean load: `(5 * 433.885 + 407.614) / 17000 = 15.16%`.
+- Incremental mean fast-loop cost versus cached bus gate: `433.885 - 436.896 = -3.011 cycles`, within benchmark/code-shape noise.
+- Incremental mean main-loop cost versus cached bus gate: `407.614 - 268.724 = 138.890 cycles = 0.817 us`.
+
+Current comparison:
+
+This Rust path now includes live hall-derived electrical angle, current conversion, FOC transforms, current filtering, PI current control, voltage command generation, candidate PWM compare computation, ADC1 bus-voltage monitoring, driver fault/enable pin sampling, latching output safety state, and a cached fast-loop output gate. It is still not feature-equivalent to C++ `motor_hall`: candidate compares are not yet applied to HRTIM, bridge outputs remain disabled, live host commands are absent, DRV8323S SPI register setup/status readback is absent, and full safe-mode/fault behavior is not implemented.
+
+The current Rust fast-loop mean remains below the recorded C++ no-voltage `motor_hall` fast-loop mean (`433.885` cycles Rust versus `708.965` cycles C++), and Rust combined mean load remains below C++ (`15.16%` versus `41.77%`). Rust combined max load is also below C++ (`29.58%` versus `58.79%`), but the Rust max fast-loop sample remains higher than the C++ fast-loop max (`924` cycles Rust versus `710` cycles C++), so max-latency variance remains a tracking item.
