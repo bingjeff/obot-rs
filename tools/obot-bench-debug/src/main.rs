@@ -28,6 +28,7 @@ const DEFAULT_DEVICE: &str = "STM32G474RE";
 const DEFAULT_ADDRESS: u32 = 0x2000_0000;
 const DEFAULT_SPEED_KHZ: u32 = 4_000;
 const DEFAULT_ELF_PATH: &str = "target/thumbv7em-none-eabihf/release/obot-g474";
+const DEFAULT_BIN_PATH: &str = "target/thumbv7em-none-eabihf/release/obot-g474.bin";
 const CYCLES_PER_100_US: u64 = 17_000;
 const FAST_LOOPS_PER_MAIN_LOOP: u64 = 5;
 const CXX_MOTOR_HALL_MAX_FAST_LOOP_CYCLES: u64 = 710;
@@ -118,6 +119,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
         "read-jlink-detail" => read_jlink_detail_command(rest),
         "run-stats-jlink" => run_stats_jlink_command(rest),
         "run-stats-usb" => run_stats_usb_command(rest),
+        "benchmark-report-usb" => benchmark_report_usb_command(rest),
         "compare-baseline-usb" => compare_baseline_usb_command(rest),
         "accepted-proof-usb" => accepted_proof_usb_command(rest),
         "powered-ready-proof-usb" => powered_ready_proof_usb_command(rest),
@@ -271,6 +273,12 @@ fn run_stats_usb_command(args: &[String]) -> Result<String, String> {
     let options = UsbRunStatsOptions::parse(args)?;
     let stats = read_usb_run_stats(&options)?;
     Ok(format_usb_run_stats_csv(DEFAULT_NAME, stats))
+}
+
+fn benchmark_report_usb_command(args: &[String]) -> Result<String, String> {
+    let options = BenchmarkReportUsbOptions::parse(args)?;
+    let report = read_benchmark_report_usb(&options)?;
+    Ok(format_benchmark_report(report))
 }
 
 fn compare_baseline_usb_command(args: &[String]) -> Result<String, String> {
@@ -967,6 +975,13 @@ struct UsbRunStatsOptions {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct BenchmarkReportUsbOptions {
+    run_stats: UsbRunStatsOptions,
+    elf_path: PathBuf,
+    bin_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct AcceptedProofUsbOptions {
     device_path: Option<PathBuf>,
     elf_path: Option<PathBuf>,
@@ -1011,6 +1026,26 @@ struct BaselineComparison {
     cxx_combined_max_cycles: u64,
     rust_combined_mean_milli_cycles: u64,
     cxx_combined_mean_milli_cycles: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UsbBenchmarkReport {
+    firmware_version: String,
+    stats: UsbRunStats,
+    program_size: u64,
+    param_size: u64,
+    text_size: u64,
+    data_size: u64,
+    bss_size: u64,
+    stack_used: u32,
+    heap_used: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ElfSectionSizes {
+    text: u64,
+    data: u64,
+    bss: u64,
 }
 
 #[repr(C)]
@@ -1191,6 +1226,41 @@ impl UsbRunStatsOptions {
 
     fn resolved_device_path(&self) -> Result<PathBuf, String> {
         resolve_usb_device_path(self.device_path.as_ref())
+    }
+}
+
+impl BenchmarkReportUsbOptions {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut run_stats_args = Vec::new();
+        let mut elf_path = PathBuf::from(DEFAULT_ELF_PATH);
+        let mut bin_path = PathBuf::from(DEFAULT_BIN_PATH);
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--elf" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--elf requires a value".to_string())?;
+                    elf_path = PathBuf::from(path);
+                }
+                "--bin" | "--binary" => {
+                    index += 1;
+                    let path = args
+                        .get(index)
+                        .ok_or_else(|| "--bin requires a value".to_string())?;
+                    bin_path = PathBuf::from(path);
+                }
+                _ => run_stats_args.push(args[index].clone()),
+            }
+            index += 1;
+        }
+
+        Ok(Self {
+            run_stats: UsbRunStatsOptions::parse(&run_stats_args)?,
+            elf_path,
+            bin_path,
+        })
     }
 }
 
@@ -1794,6 +1864,57 @@ fn read_usb_run_stats(options: &UsbRunStatsOptions) -> Result<UsbRunStats, Strin
     }
 
     Ok(stats.finish())
+}
+
+fn read_benchmark_report_usb(
+    options: &BenchmarkReportUsbOptions,
+) -> Result<UsbBenchmarkReport, String> {
+    let stats = read_usb_run_stats(&options.run_stats)?;
+    let firmware_version = read_text_api_usb(&TextApiUsbOptions {
+        device_path: options.run_stats.device_path.clone(),
+        request: "firmware_version".to_string(),
+        timeout_ms: options.run_stats.timeout_ms,
+    })?;
+    let stack_used = read_text_api_usb_u32(
+        options.run_stats.device_path.clone(),
+        "stack_used",
+        options.run_stats.timeout_ms,
+    )?;
+    let heap_used = read_text_api_usb_u32(
+        options.run_stats.device_path.clone(),
+        "heap_used",
+        options.run_stats.timeout_ms,
+    )?;
+    let section_sizes = elf_section_sizes(&options.elf_path)?;
+    Ok(UsbBenchmarkReport {
+        firmware_version: firmware_version.trim().to_string(),
+        stats,
+        program_size: file_size_bytes(&options.bin_path)?,
+        param_size: 0,
+        text_size: section_sizes.text,
+        data_size: section_sizes.data,
+        bss_size: section_sizes.bss,
+        stack_used,
+        heap_used,
+    })
+}
+
+fn read_text_api_usb_u32(
+    device_path: Option<PathBuf>,
+    request: &str,
+    timeout_ms: u32,
+) -> Result<u32, String> {
+    let response = read_text_api_usb(&TextApiUsbOptions {
+        device_path,
+        request: request.to_string(),
+        timeout_ms,
+    })?;
+    response.trim().parse().map_err(|_| {
+        format!(
+            "text API `{request}` returned non-u32 value `{}`",
+            response.trim()
+        )
+    })
 }
 
 fn accepted_proof_usb(options: &AcceptedProofUsbOptions) -> Result<String, String> {
@@ -3135,6 +3256,49 @@ fn resolve_symbol_address(path: &Path, symbol: &str) -> Result<u32, String> {
         .ok_or_else(|| format!("symbol `{symbol}` not found in `{}`", path.display()))
 }
 
+fn file_size_bytes(path: &Path) -> Result<u64, String> {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| format!("failed to stat `{}`: {error}", path.display()))
+}
+
+fn elf_section_sizes(path: &Path) -> Result<ElfSectionSizes, String> {
+    let output = Command::new("size")
+        .arg(path)
+        .output()
+        .map_err(|error| format!("failed to run size for `{}`: {error}", path.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "size failed for `{}` with status {}\nstdout:\n{}\nstderr:\n{}",
+            path.display(),
+            output.status,
+            stdout,
+            stderr
+        ));
+    }
+    parse_size_output(&stdout).ok_or_else(|| {
+        format!(
+            "failed to parse size output for `{}`:\n{}",
+            path.display(),
+            stdout
+        )
+    })
+}
+
+fn parse_size_output(output: &str) -> Option<ElfSectionSizes> {
+    let mut lines = output.lines();
+    lines.next()?;
+    let values = lines.next()?;
+    let mut fields = values.split_whitespace();
+    Some(ElfSectionSizes {
+        text: fields.next()?.parse().ok()?,
+        data: fields.next()?.parse().ok()?,
+        bss: fields.next()?.parse().ok()?,
+    })
+}
+
 fn run_llvm_nm(path: &Path) -> Result<std::process::Output, String> {
     match Command::new("llvm-nm").arg(path).output() {
         Ok(output) => Ok(output),
@@ -3836,6 +4000,28 @@ fn decode_packet(bytes: &[u8]) -> Result<BenchmarkPacket, String> {
     BenchmarkPacket::decode(bytes).map_err(|error| format!("decode failed: {error:?}"))
 }
 
+fn format_benchmark_report(report: UsbBenchmarkReport) -> String {
+    format!(
+        "rust_motor_hall {}\n  mean_fast_loop_cycles  {}  {} cycles\n  mean_fast_loop_period  {}  {} cycles\n  mean_main_loop_cycles  {}  {} cycles\n  mean_main_loop_period  {}  {} cycles\n  program_size {} bytes\n  param_size   {} bytes\n  text_size   {} bytes\n  data_size  {} bytes\n  bss_size   {} bytes\n  stack_used   {} bytes\n  heap_used    {} bytes\n",
+        report.firmware_version,
+        report.stats.max_fast_loop_cycles,
+        format_milli_cycles(report.stats.mean_fast_loop_cycles_milli),
+        report.stats.max_fast_loop_period,
+        format_milli_cycles(report.stats.mean_fast_loop_period_milli),
+        report.stats.max_main_loop_cycles,
+        format_milli_cycles(report.stats.mean_main_loop_cycles_milli),
+        report.stats.max_main_loop_period,
+        format_milli_cycles(report.stats.mean_main_loop_period_milli),
+        report.program_size,
+        report.param_size,
+        report.text_size,
+        report.data_size,
+        report.bss_size,
+        report.stack_used,
+        report.heap_used,
+    )
+}
+
 fn format_usb_run_stats_csv(name: &str, stats: UsbRunStats) -> String {
     format!(
         "name, max_fast_loop_cycles, max_fast_loop_period, max_main_loop_cycles, max_main_loop_period, mean_fast_loop_cycles, mean_fast_loop_period, mean_main_loop_cycles, mean_main_loop_period\n{}, {}, {}, {}, {}, {}, {}, {}, {}\n",
@@ -4054,6 +4240,7 @@ fn usage() -> String {
   obot-bench-debug read-jlink-detail [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-jlink [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--address 0x20000000] [--speed 4000]
   obot-bench-debug run-stats-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
+  obot-bench-debug benchmark-report-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--bin target/thumbv7em-none-eabihf/release/obot-g474.bin] [--timeout-ms N]
   obot-bench-debug compare-baseline-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--timeout-ms N]
   obot-bench-debug accepted-proof-usb [samples] [--samples N] [--dev /dev/bus/usb/<bus>/<dev>] [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--sequence N] [--expect-firmware-version VERSION] [--timeout-ms N] [--command-poll-timeout-ms N] [--command-poll-interval-ms N] [--driver-poll-timeout-ms N] [--driver-poll-interval-ms N]
   obot-bench-debug powered-ready-proof-usb [--dev /dev/bus/usb/<bus>/<dev>] [--elf target/thumbv7em-none-eabihf/release/obot-g474] [--sequence N] [--expect-firmware-version VERSION] [--timeout-ms N] [--poll-timeout-ms N] [--poll-interval-ms N]
@@ -4581,6 +4768,67 @@ mod tests {
         let options = UsbRunStatsOptions::parse(&["7".to_string()]).unwrap();
 
         assert_eq!(options.samples, 7);
+    }
+
+    #[test]
+    fn parses_benchmark_report_usb_options() {
+        let options = BenchmarkReportUsbOptions::parse(&[
+            "--samples".to_string(),
+            "12".to_string(),
+            "--timeout-ms".to_string(),
+            "250".to_string(),
+            "--elf".to_string(),
+            "firmware.elf".to_string(),
+            "--bin".to_string(),
+            "firmware.bin".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.run_stats.samples, 12);
+        assert_eq!(options.run_stats.timeout_ms, 250);
+        assert_eq!(options.elf_path, PathBuf::from("firmware.elf"));
+        assert_eq!(options.bin_path, PathBuf::from("firmware.bin"));
+    }
+
+    #[test]
+    fn parses_size_output() {
+        assert_eq!(
+            parse_size_output("text data bss dec hex filename\n45056 12 345 45413 b165 firmware\n"),
+            Some(ElfSectionSizes {
+                text: 45_056,
+                data: 12,
+                bss: 345,
+            })
+        );
+    }
+
+    #[test]
+    fn formats_benchmark_report_like_script_block() {
+        let output = format_benchmark_report(UsbBenchmarkReport {
+            firmware_version: "abc1234".to_string(),
+            stats: UsbRunStats {
+                max_fast_loop_cycles: 845,
+                max_fast_loop_period: 3463,
+                max_main_loop_cycles: 2864,
+                max_main_loop_period: 21660,
+                mean_fast_loop_cycles_milli: 844_975,
+                mean_fast_loop_period_milli: 3_400_640,
+                mean_main_loop_cycles_milli: 2_619_165,
+                mean_main_loop_period_milli: 17_005_910,
+            },
+            program_size: 45_056,
+            param_size: 0,
+            text_size: 41_000,
+            data_size: 8,
+            bss_size: 512,
+            stack_used: 1_464,
+            heap_used: 0,
+        });
+
+        assert_eq!(
+            output,
+            "rust_motor_hall abc1234\n  mean_fast_loop_cycles  845  844.975 cycles\n  mean_fast_loop_period  3463  3400.64 cycles\n  mean_main_loop_cycles  2864  2619.165 cycles\n  mean_main_loop_period  21660  17005.91 cycles\n  program_size 45056 bytes\n  param_size   0 bytes\n  text_size   41000 bytes\n  data_size  8 bytes\n  bss_size   512 bytes\n  stack_used   1464 bytes\n  heap_used    0 bytes\n"
+        );
     }
 
     #[test]
