@@ -1,5 +1,11 @@
 use crate::foc::FocVoltages;
 
+const ADC_VREF_V: f32 = 3.3;
+const MOTOR_HALL_VBUS_DIVIDER_GAIN: f32 = (215.0 + 13.7) / 13.7;
+const MOTOR_HALL_VBUS_VOLTS_PER_COUNT: f32 = ADC_VREF_V * MOTOR_HALL_VBUS_DIVIDER_GAIN / 4096.0;
+const MOTOR_HALL_VBUS_MIN_RAW: u16 = 595;
+const MOTOR_HALL_VBUS_MAX_RAW: u16 = 4_095;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BusVoltageSample {
     pub raw: u16,
@@ -13,7 +19,7 @@ pub struct BusVoltageCalibration {
 
 impl BusVoltageCalibration {
     pub const MOTOR_HALL: Self = Self {
-        volts_per_count: (215.0 + 13.7) / 13.7 / 4096.0,
+        volts_per_count: MOTOR_HALL_VBUS_VOLTS_PER_COUNT,
     };
 
     #[inline(always)]
@@ -37,8 +43,8 @@ impl OutputGate {
     pub const MOTOR_HALL: Self = Self {
         min_vbus_v: 8.0,
         max_vbus_v: 60.0,
-        min_raw: 1_963,
-        max_raw: 14_721,
+        min_raw: MOTOR_HALL_VBUS_MIN_RAW,
+        max_raw: MOTOR_HALL_VBUS_MAX_RAW,
     };
 
     #[inline(always)]
@@ -79,8 +85,15 @@ mod tests {
     #[test]
     fn motor_hall_vbus_gain_matches_cpp_param() {
         let calibration = BusVoltageCalibration::MOTOR_HALL;
-        assert_close(calibration.volts_per_count, (215.0 + 13.7) / 13.7 / 4096.0);
-        assert_close(calibration.convert(4096).volts, (215.0 + 13.7) / 13.7);
+        assert_close(
+            calibration.volts_per_count,
+            ADC_VREF_V * (215.0 + 13.7) / 13.7 / 4096.0,
+        );
+        assert_close(
+            calibration.convert(4096).volts,
+            ADC_VREF_V * (215.0 + 13.7) / 13.7,
+        );
+        assert_close(calibration.convert(3_521).volts, 47.354_973);
     }
 
     #[test]
@@ -126,11 +139,8 @@ mod tests {
             gate.gate_voltages(command, BusVoltageSample { raw: 0, volts: 0.0 }),
             FocVoltages::default()
         );
-        assert_eq!(gate.gate_voltages_raw(command, 1_963), command);
-        assert_eq!(
-            gate.gate_voltages_raw(command, 1_962),
-            FocVoltages::default()
-        );
+        assert_eq!(gate.gate_voltages_raw(command, 595), command);
+        assert_eq!(gate.gate_voltages_raw(command, 594), FocVoltages::default());
     }
 
     fn assert_close(actual: f32, expected: f32) {

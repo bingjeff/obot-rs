@@ -4270,7 +4270,7 @@ mod tests {
 
         assert_eq!(
             output,
-            "name, sequence, bus_voltage_raw, bus_voltage_volts, bus_allows_output\nrust, 6, 1963, 8.000, true\n"
+            "name, sequence, bus_voltage_raw, bus_voltage_volts, bus_allows_output\nrust, 6, 595, 8.002, true\n"
         );
     }
 

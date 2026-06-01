@@ -1,7 +1,12 @@
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 
-use obot_core::{benchmark::BenchmarkReport, hall::HallMotionEstimate, output::OutputSafetyStatus};
+use obot_core::{
+    benchmark::BenchmarkReport,
+    hall::HallMotionEstimate,
+    output::OutputSafetyStatus,
+    power::{BusVoltageCalibration, OutputGate},
+};
 use obot_protocol::{
     COMMAND_PACKET_LEN, CommandPacket, DRIVER_COMMAND_PACKET_LEN, DriverCommandPacket,
     STATUS_PACKET_LEN, StatusPacket,
@@ -537,6 +542,8 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "controller_faulted",
     "host_timed_out",
     "bus_voltage_raw",
+    "bus_voltage_volts",
+    "bus_allows_output",
     "motor_position_raw",
     "motor_position_rad",
     "motor_velocity_rad_s",
@@ -623,6 +630,12 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
         }
         b"host_timed_out" => write_bool(load_output_safety_flag(HOST_TIMED_OUT_BIT), output),
         b"bus_voltage_raw" => write_u32_decimal(BUS_VOLTAGE_RAW.load(Ordering::Relaxed), output),
+        b"bus_voltage_volts" => write_fixed3_milli_i32(bus_voltage_millivolts(), output),
+        b"bus_allows_output" => write_bool(
+            OutputGate::MOTOR_HALL
+                .allows_output_raw(BUS_VOLTAGE_RAW.load(Ordering::Relaxed) as u16),
+            output,
+        ),
         b"motor_position_raw" => {
             write_i32_decimal(MOTOR_POSITION_RAW.load(Ordering::Relaxed), output)
         }
@@ -686,6 +699,11 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
 
 fn load_output_safety_flag(bit: u32) -> bool {
     OUTPUT_SAFETY_FLAGS.load(Ordering::Relaxed) & bit != 0
+}
+
+fn bus_voltage_millivolts() -> i32 {
+    let raw = BUS_VOLTAGE_RAW.load(Ordering::Relaxed) as u16;
+    (BusVoltageCalibration::MOTOR_HALL.convert(raw).volts * 1_000.0) as i32
 }
 
 fn bridge_outputs_disabled() -> bool {

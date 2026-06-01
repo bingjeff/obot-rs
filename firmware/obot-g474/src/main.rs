@@ -33,7 +33,7 @@ use obot_core::{
     host::{HostCommandWatchdog, HostCommandWatchdogStatus},
     outer_loop::{MotorHallOuterLoop, MotorHallOuterLoopParam},
     output::{OutputSafety, OutputSafetyInputs, OutputSafetyStatus},
-    power::OutputGate,
+    power::{BusVoltageCalibration, OutputGate},
     text_api::{ApiDispatchError, ApiRequest, ApiValue, format_value, parse_request},
 };
 #[cfg(target_os = "none")]
@@ -890,7 +890,7 @@ fn milli_percent_milli(numerator_milli_cycles: u64, denominator_cycles: u64) -> 
 
 #[cfg(target_os = "none")]
 fn bus_voltage_millivolts(raw: u16) -> i64 {
-    raw as i64 * 8_000 / OutputGate::MOTOR_HALL.min_raw as i64
+    (BusVoltageCalibration::MOTOR_HALL.convert(raw).volts * 1_000.0) as i64
 }
 
 #[cfg(target_os = "none")]
