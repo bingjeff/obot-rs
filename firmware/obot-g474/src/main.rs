@@ -162,7 +162,6 @@ fn firmware_main() -> ! {
     let bus_voltage_adc = current_adc;
     let output_gate = OutputGate::MOTOR_HALL;
     let mut bus_voltage_raw = 0_u16;
-    let mut output_allowed = false;
     let mut hall_motion = HallMotionEstimator::new(42.0, -1.0, 10_000.0, 0.005);
     let mut outer_loop =
         MotorHallOuterLoop::new(MotorHallOuterLoopParam::MOTOR_HALL, 1.0 / 10_000.0);
@@ -182,7 +181,6 @@ fn firmware_main() -> ! {
         current_adc,
         foc,
         foc_desired,
-        output_allowed,
     ));
     start_fast_loop_interrupt();
 
@@ -234,8 +232,7 @@ fn firmware_main() -> ! {
                     host_status.timed_out,
                     host_poll.clear_output_safety_faults,
                 );
-                output_allowed = output_safety_status.output_allowed;
-                set_fast_loop_command(foc_desired, output_allowed);
+                set_fast_loop_command(foc_desired);
                 led.update_for_state(controller_state);
                 output_safety_sequence =
                     publish_output_safety_report(output_safety_sequence, output_safety_status);
@@ -368,7 +365,6 @@ struct FastLoopContext {
     hall_count: i32,
     foc: MotorHallFocController,
     foc_desired: FocDesired,
-    output_allowed: bool,
     latest_currents: PhaseCurrents,
     latest_hall_count: u8,
     latest_voltage_command: DqVoltages,
@@ -383,7 +379,6 @@ impl FastLoopContext {
         current_adc: CurrentAdc,
         foc: MotorHallFocController,
         foc_desired: FocDesired,
-        output_allowed: bool,
     ) -> Self {
         Self {
             benchmark: LoopBenchmark::new(),
@@ -394,7 +389,6 @@ impl FastLoopContext {
             hall_count: 0,
             foc,
             foc_desired,
-            output_allowed,
             latest_currents: PhaseCurrents::default(),
             latest_hall_count: 0,
             latest_voltage_command: DqVoltages::default(),
@@ -416,14 +410,12 @@ impl FastLoopContext {
             hall_sincos.cos,
         );
         self.latest_voltage_command = voltage_command;
-        core::hint::black_box(voltage_command);
         self.pwm.write_zero_voltage();
         self.benchmark.finish(sample, self.cycle_counter.now());
     }
 
-    fn set_command(&mut self, foc_desired: FocDesired, output_allowed: bool) {
+    fn set_command(&mut self, foc_desired: FocDesired) {
         self.foc_desired = foc_desired;
-        self.output_allowed = output_allowed;
     }
 }
 
@@ -470,10 +462,10 @@ fn main_loop_due(next_main_fast_tick: &mut u32) -> bool {
 }
 
 #[cfg(target_os = "none")]
-fn set_fast_loop_command(foc_desired: FocDesired, output_allowed: bool) {
+fn set_fast_loop_command(foc_desired: FocDesired) {
     interrupt_free(|| {
         if let Some(context) = fast_loop_context_mut() {
-            context.set_command(foc_desired, output_allowed);
+            context.set_command(foc_desired);
         }
     });
 }
