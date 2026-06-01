@@ -1,5 +1,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
+use obot_core::{ControlMode, MotorState};
+
 const RCC_BASE: usize = 0x4002_1000;
 const RCC_APB1ENR1: usize = RCC_BASE + 0x58;
 const RCC_AHB2ENR: usize = RCC_BASE + 0x4C;
@@ -40,6 +42,11 @@ const TIM_CCER_CC2E: u32 = 1 << 4;
 const TIM_CCER_CC3E: u32 = 1 << 8;
 const TIM_CR1_CEN: u32 = 1 << 0;
 const LED_PERIOD_COUNTS: u16 = u16::MAX;
+const LED_UPDATE_HZ: u16 = 10_000;
+const LED_DEFAULT_RATE_HZ: u16 = 1;
+const LED_FAULT_RATE_HZ: u16 = 2;
+const LED_COLOR_SCALE: u32 = 255;
+const LED_COMPARE_SCALE: u32 = LED_PERIOD_COUNTS as u32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LedChannelMap {
@@ -69,8 +76,30 @@ pub enum LedChannel {
     Ch3,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LedColor {
+    Red,
+    Azure,
+    Blue,
+    Rose,
+}
+
+impl LedColor {
+    const fn rgb(self) -> [u8; 3] {
+        match self {
+            Self::Red => [255, 0, 0],
+            Self::Azure => [0, 128, 255],
+            Self::Blue => [0, 0, 255],
+            Self::Rose => [255, 0, 128],
+        }
+    }
+}
+
 pub struct StatusLed {
     channels: LedChannelMap,
+    color: LedColor,
+    tick: u16,
+    period_ticks: u16,
 }
 
 impl StatusLed {
@@ -86,9 +115,43 @@ impl StatusLed {
         enable_clocks();
         configure_led_pins();
         configure_tim4_pwm();
-        let led = Self { channels };
+        let led = Self {
+            channels,
+            color: LedColor::Azure,
+            tick: 0,
+            period_ticks: rate_period_ticks(LED_DEFAULT_RATE_HZ),
+        };
         led.set_rgb_raw(0, 0, 0);
         led
+    }
+
+    pub fn update_for_state(&mut self, state: MotorState) {
+        let (color, rate_hz) = led_status_for_state(state);
+        self.set_color(color);
+        self.set_rate_hz(rate_hz);
+        self.update();
+    }
+
+    pub fn set_color(&mut self, color: LedColor) {
+        self.color = color;
+    }
+
+    pub fn set_rate_hz(&mut self, rate_hz: u16) {
+        self.period_ticks = rate_period_ticks(rate_hz);
+    }
+
+    pub fn update(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
+        if self.tick >= self.period_ticks {
+            self.tick = 0;
+        }
+        let intensity = pulse_compare(self.tick, self.period_ticks);
+        let [red, green, blue] = self.color.rgb();
+        self.set_rgb_raw(
+            scale_color(red, intensity),
+            scale_color(green, intensity),
+            scale_color(blue, intensity),
+        );
     }
 
     pub fn set_rgb_raw(&self, red: u16, green: u16, blue: u16) {
@@ -103,6 +166,18 @@ impl StatusLed {
 
     fn write_channel(&self, channel: LedChannel, value: u16) {
         write(channel_compare_register(channel), value as u32);
+    }
+}
+
+pub fn led_status_for_state(state: MotorState) -> (LedColor, u16) {
+    if state.fault.is_some() {
+        return (LedColor::Red, LED_FAULT_RATE_HZ);
+    }
+
+    match state.mode {
+        ControlMode::Disabled | ControlMode::ClearFaults => (LedColor::Azure, LED_DEFAULT_RATE_HZ),
+        ControlMode::Torque => (LedColor::Rose, LED_DEFAULT_RATE_HZ),
+        ControlMode::Velocity | ControlMode::Position => (LedColor::Blue, LED_DEFAULT_RATE_HZ),
     }
 }
 
@@ -166,6 +241,28 @@ const fn channel_compare_register(channel: LedChannel) -> usize {
     }
 }
 
+const fn rate_period_ticks(rate_hz: u16) -> u16 {
+    let rate_hz = if rate_hz == 0 { 1 } else { rate_hz };
+    LED_UPDATE_HZ / rate_hz
+}
+
+fn pulse_compare(tick: u16, period_ticks: u16) -> u16 {
+    let period = period_ticks.max(1) as u32;
+    let tick = tick as u32 % period;
+    let half_period = period / 2;
+    let triangle = if tick < half_period {
+        tick * LED_COMPARE_SCALE / half_period.max(1)
+    } else {
+        (period - tick) * LED_COMPARE_SCALE / (period - half_period).max(1)
+    };
+    let cubic = u64::from(triangle) * u64::from(triangle) * u64::from(triangle);
+    (cubic / u64::from(LED_COMPARE_SCALE * LED_COMPARE_SCALE)) as u16
+}
+
+fn scale_color(channel: u8, intensity: u16) -> u16 {
+    (u32::from(channel) * u32::from(intensity) / LED_COLOR_SCALE) as u16
+}
+
 fn set_two_bit_field(value: u32, pin: u32, field: u32) -> u32 {
     let shift = pin * 2;
     (value & !(0b11 << shift)) | (field << shift)
@@ -196,6 +293,7 @@ fn write(address: usize, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obot_core::Fault;
 
     #[test]
     fn motor_hall_led_pins_match_cpp_setup() {
@@ -231,5 +329,56 @@ mod tests {
         assert_eq!(channel_compare_register(LedChannel::Ch1), TIM_CCR1);
         assert_eq!(channel_compare_register(LedChannel::Ch2), TIM_CCR2);
         assert_eq!(channel_compare_register(LedChannel::Ch3), TIM_CCR3);
+    }
+
+    #[test]
+    fn led_status_tracks_available_control_modes() {
+        assert_eq!(
+            led_status_for_state(MotorState::default()),
+            (LedColor::Azure, LED_DEFAULT_RATE_HZ)
+        );
+        assert_eq!(
+            led_status_for_state(MotorState {
+                mode: ControlMode::Torque,
+                ..MotorState::default()
+            }),
+            (LedColor::Rose, LED_DEFAULT_RATE_HZ)
+        );
+        assert_eq!(
+            led_status_for_state(MotorState {
+                mode: ControlMode::Velocity,
+                ..MotorState::default()
+            }),
+            (LedColor::Blue, LED_DEFAULT_RATE_HZ)
+        );
+        assert_eq!(
+            led_status_for_state(MotorState {
+                mode: ControlMode::Position,
+                ..MotorState::default()
+            }),
+            (LedColor::Blue, LED_DEFAULT_RATE_HZ)
+        );
+        assert_eq!(
+            led_status_for_state(MotorState {
+                fault: Some(Fault::TorqueLimit),
+                ..MotorState::default()
+            }),
+            (LedColor::Red, LED_FAULT_RATE_HZ)
+        );
+    }
+
+    #[test]
+    fn pulse_compare_matches_cubic_triangle_shape() {
+        assert_eq!(pulse_compare(0, 10_000), 0);
+        assert_eq!(pulse_compare(2_500, 10_000), 8191);
+        assert_eq!(pulse_compare(5_000, 10_000), 65_535);
+        assert_eq!(pulse_compare(7_500, 10_000), 8191);
+    }
+
+    #[test]
+    fn color_scaling_uses_led_compare_range() {
+        assert_eq!(scale_color(255, 65_535), 65_535);
+        assert_eq!(scale_color(128, 65_535), 32_896);
+        assert_eq!(scale_color(255, 8_191), 8_191);
     }
 }

@@ -150,7 +150,7 @@ fn firmware_main() -> ! {
     let main_cycle_counter = SysTickMainCycleCounter;
     let driver = MotorDriverPins::init_motor_hall_disabled();
     let driver_spi = Drv8323s::init_motor_hall();
-    let led = StatusLed::init_motor_hall();
+    let mut led = StatusLed::init_motor_hall();
     let pwm = SafeZeroPwm::init_motor_hall();
     let hall = HallInputs::init_motor_hall();
     let current_adc = match CurrentAdc::init_motor_hall() {
@@ -228,6 +228,7 @@ fn firmware_main() -> ! {
                 );
                 output_allowed = output_safety_status.output_allowed;
                 set_fast_loop_command(foc_desired, output_allowed);
+                led.update_for_state(controller_state);
                 output_safety_sequence =
                     publish_output_safety_report(output_safety_sequence, output_safety_status);
                 let bridge_output_status = fast_loop_bridge_output_status();
