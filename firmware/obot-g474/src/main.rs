@@ -47,6 +47,8 @@ use obot_g474::drv8323s::{Drv8323s, Drv8323sConfigReport};
 #[cfg(target_os = "none")]
 use obot_g474::hall::HallInputs;
 #[cfg(target_os = "none")]
+use obot_g474::led::StatusLed;
+#[cfg(target_os = "none")]
 use obot_g474::pwm::{BridgeOutputStatus, SafeZeroPwm};
 #[cfg(target_os = "none")]
 use obot_protocol::{
@@ -148,6 +150,7 @@ fn firmware_main() -> ! {
     let main_cycle_counter = SysTickMainCycleCounter;
     let driver = MotorDriverPins::init_motor_hall_disabled();
     let driver_spi = Drv8323s::init_motor_hall();
+    let led = StatusLed::init_motor_hall();
     let pwm = SafeZeroPwm::init_motor_hall();
     let hall = HallInputs::init_motor_hall();
     let current_adc = match CurrentAdc::init_motor_hall() {
@@ -171,7 +174,7 @@ fn firmware_main() -> ! {
     foc.initialize();
     usb.connect();
 
-    core::hint::black_box(pwm.config());
+    core::hint::black_box((pwm.config(), led.channels()));
     install_fast_loop_context(FastLoopContext::new(
         cycle_counter,
         pwm,
