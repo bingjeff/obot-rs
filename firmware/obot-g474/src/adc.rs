@@ -120,6 +120,7 @@ impl CurrentAdc {
         Ok(Self)
     }
 
+    #[inline(always)]
     pub fn read_samples(&self) -> CurrentSamples {
         CurrentSamples {
             phase_a: read_jdr1(ADC3_BASE),
@@ -278,10 +279,12 @@ fn start_injected_conversions() {
     });
 }
 
+#[inline(always)]
 fn read_dr(adc_base: usize) -> u16 {
     (read(adc_register(adc_base, ADC_DR)) & 0xFFFF) as u16
 }
 
+#[inline(always)]
 fn read_jdr1(adc_base: usize) -> u16 {
     (read(adc_register(adc_base, ADC_JDR1)) & 0xFFFF) as u16
 }
@@ -342,6 +345,7 @@ const fn four_bit_low_pin_mask(pin: u32) -> u32 {
     0b1111 << (pin * 4)
 }
 
+#[inline(always)]
 fn adc_register(adc_base: usize, offset: usize) -> usize {
     adc_base + offset
 }
@@ -351,6 +355,7 @@ fn modify(address: usize, f: impl FnOnce(u32) -> u32) {
     write(address, f(value));
 }
 
+#[inline(always)]
 fn read(address: usize) -> u32 {
     // SAFETY: The caller passes STM32G474 memory-mapped register addresses.
     // Volatile access is required so register reads are not elided or cached.
