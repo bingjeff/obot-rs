@@ -157,6 +157,12 @@ pub struct DqCurrents {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DqVoltages {
+    pub v_d: f32,
+    pub v_q: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FocVoltages {
     pub v_a: f32,
     pub v_b: f32,
@@ -204,12 +210,24 @@ impl MotorHallFocController {
         sin_t: f32,
         cos_t: f32,
     ) -> FocVoltages {
+        let dq = self.step_dq_voltage_command_with_sincos(desired, currents, sin_t, cos_t);
+        voltage_command_from_dq(dq.v_d, dq.v_q, sin_t, cos_t)
+    }
+
+    #[inline(always)]
+    pub fn step_dq_voltage_command_with_sincos(
+        &mut self,
+        desired: FocDesired,
+        currents: PhaseCurrents,
+        sin_t: f32,
+        cos_t: f32,
+    ) -> DqVoltages {
         let (i_d, i_q) = dq_currents(currents, sin_t, cos_t);
         let i_d_filtered = self.id_filter.update(i_d);
         let i_q_filtered = self.iq_filter.update(i_q);
         let v_d = self.pi_d.step(desired.i_d, i_d_filtered);
         let v_q = self.pi_q.step(desired.i_q, i_q_filtered) + desired.v_q;
-        voltage_command_from_dq(v_d, v_q, sin_t, cos_t)
+        DqVoltages { v_d, v_q }
     }
 }
 
@@ -590,6 +608,31 @@ mod tests {
         let actual = fixed.step_voltage_command_with_sincos(desired, currents, 0.5, 0.866_025_4);
 
         assert_voltages_close(actual, expected);
+    }
+
+    #[test]
+    fn motor_hall_dq_voltage_command_matches_full_voltage_command_dq_fields() {
+        let desired = FocDesired {
+            i_d: 0.25,
+            i_q: -0.75,
+            v_q: 0.5,
+        };
+        let currents = PhaseCurrents {
+            phase_a: 0.8,
+            phase_b: -0.3,
+            phase_c: -0.5,
+        };
+        let mut full = MotorHallFocController::new(DT_50_KHZ);
+        let mut dq_only = MotorHallFocController::new(DT_50_KHZ);
+        full.initialize();
+        dq_only.initialize();
+
+        let expected = full.step_voltage_command_with_sincos(desired, currents, 0.5, 0.866_025_4);
+        let actual =
+            dq_only.step_dq_voltage_command_with_sincos(desired, currents, 0.5, 0.866_025_4);
+
+        assert_close(actual.v_d, expected.v_d);
+        assert_close(actual.v_q, expected.v_q);
     }
 
     fn assert_voltages_close(actual: FocVoltages, expected: FocVoltages) {
