@@ -146,6 +146,7 @@ impl SafeZeroPwm {
         pwm
     }
 
+    #[inline(always)]
     pub fn write_zero_voltage(&self) {
         self.write_phase_zero(TIMER_D);
         self.write_phase_zero(TIMER_E);
@@ -220,6 +221,7 @@ impl SafeZeroPwm {
         disable_outputs();
     }
 
+    #[inline(always)]
     fn write_phase_zero(&self, timer: usize) {
         self.write_phase_compare(timer, PWM_ZERO_COMPARE);
     }

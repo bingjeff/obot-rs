@@ -403,9 +403,8 @@ impl FastLoopContext {
             hall_sincos.sin,
             hall_sincos.cos,
         );
-        let _ = self
-            .pwm
-            .write_gated_voltage_commands_disabled(voltage_command, self.output_allowed);
+        core::hint::black_box(voltage_command);
+        self.pwm.write_zero_voltage();
         self.benchmark.finish(sample, self.cycle_counter.now());
     }
 
