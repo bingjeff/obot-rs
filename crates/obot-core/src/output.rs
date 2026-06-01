@@ -32,7 +32,7 @@ impl OutputSafety {
     }
 
     pub fn update(&mut self, inputs: OutputSafetyInputs) -> OutputSafetyStatus {
-        self.driver_fault_latched |= inputs.driver_faulted;
+        self.driver_fault_latched |= inputs.driver_enabled && inputs.driver_faulted;
 
         let command_blocked = !inputs.command_allows_output;
         let bus_blocked = !inputs.bus_allows_output;
@@ -108,6 +108,21 @@ mod tests {
         let status = safety.update(inputs);
         assert!(!status.output_allowed);
         assert!(status.host_timed_out);
+    }
+
+    #[test]
+    fn ignores_fault_pin_while_driver_is_disabled() {
+        let mut safety = OutputSafety::new();
+        let mut inputs = allowed_inputs();
+        inputs.driver_enabled = false;
+        inputs.driver_faulted = true;
+
+        let disabled = safety.update(inputs);
+        assert!(!disabled.output_allowed);
+        assert!(disabled.driver_not_enabled);
+        assert!(!disabled.driver_fault_latched);
+
+        assert!(safety.update(allowed_inputs()).output_allowed);
     }
 
     #[test]
