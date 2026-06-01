@@ -53,6 +53,7 @@ static VECTOR_TABLE: VectorTable = VectorTable {
 pub extern "C" fn Reset() -> ! {
     enable_fpu();
     init_memory();
+    obot_g474::memory::init_stack_watermark();
     super::firmware_main();
 }
 

@@ -686,6 +686,10 @@ const TEXT_API_NAMES: &[&str] = &[
     "transfer_error_mask",
     "status_before",
     "status_after",
+    "stack_free",
+    "stack_used",
+    "heap_free",
+    "heap_used",
 ];
 
 #[cfg(target_os = "none")]
@@ -846,6 +850,10 @@ fn format_firmware_text_api_value<'out>(
                 .status_after
                 .map_or(0, |status| status.as_u32()),
         ),
+        "stack_free" => ApiValue::U32(obot_g474::memory::stack_free_bytes()),
+        "stack_used" => ApiValue::U32(obot_g474::memory::stack_used_bytes()),
+        "heap_free" => ApiValue::U32(obot_g474::memory::heap_free_bytes()),
+        "heap_used" => ApiValue::U32(obot_g474::memory::heap_used_bytes()),
         _ => return Err(ApiDispatchError::UnknownName),
     };
 

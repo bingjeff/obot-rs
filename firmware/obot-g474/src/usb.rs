@@ -566,6 +566,10 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "realtime_command_consumed_version",
     "driver_command_version",
     "driver_command_consumed_version",
+    "stack_free",
+    "stack_used",
+    "heap_free",
+    "heap_used",
 ];
 
 fn send_text_api_response_immediate(request: &[u8]) {
@@ -693,6 +697,10 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
             DRIVER_COMMAND_CONSUMED_VERSION.load(Ordering::Relaxed),
             output,
         ),
+        b"stack_free" => write_u32_decimal(crate::memory::stack_free_bytes(), output),
+        b"stack_used" => write_u32_decimal(crate::memory::stack_used_bytes(), output),
+        b"heap_free" => write_u32_decimal(crate::memory::heap_free_bytes(), output),
+        b"heap_used" => write_u32_decimal(crate::memory::heap_used_bytes(), output),
         _ => None,
     }
 }
