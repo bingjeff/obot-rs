@@ -98,8 +98,8 @@ impl LedColor {
 pub struct StatusLed {
     channels: LedChannelMap,
     color: LedColor,
-    tick: u16,
-    period_ticks: u16,
+    phase: u32,
+    phase_step: u32,
 }
 
 impl StatusLed {
@@ -118,8 +118,8 @@ impl StatusLed {
         let led = Self {
             channels,
             color: LedColor::Azure,
-            tick: 0,
-            period_ticks: rate_period_ticks(LED_DEFAULT_RATE_HZ),
+            phase: 0,
+            phase_step: rate_phase_step(LED_DEFAULT_RATE_HZ),
         };
         led.set_rgb_raw(0, 0, 0);
         led
@@ -137,15 +137,12 @@ impl StatusLed {
     }
 
     pub fn set_rate_hz(&mut self, rate_hz: u16) {
-        self.period_ticks = rate_period_ticks(rate_hz);
+        self.phase_step = rate_phase_step(rate_hz);
     }
 
     pub fn update(&mut self) {
-        self.tick = self.tick.wrapping_add(1);
-        if self.tick >= self.period_ticks {
-            self.tick = 0;
-        }
-        let intensity = pulse_compare(self.tick, self.period_ticks);
+        self.phase = self.phase.wrapping_add(self.phase_step);
+        let intensity = pulse_compare(self.phase);
         let [red, green, blue] = self.color.rgb();
         self.set_rgb_raw(
             scale_color(red, intensity),
@@ -241,22 +238,20 @@ const fn channel_compare_register(channel: LedChannel) -> usize {
     }
 }
 
-const fn rate_period_ticks(rate_hz: u16) -> u16 {
-    let rate_hz = if rate_hz == 0 { 1 } else { rate_hz };
-    LED_UPDATE_HZ / rate_hz
+const fn rate_phase_step(rate_hz: u16) -> u32 {
+    let rate_hz = if rate_hz == 0 { 1 } else { rate_hz } as u64;
+    ((1_u64 << 32) * rate_hz / LED_UPDATE_HZ as u64) as u32
 }
 
-fn pulse_compare(tick: u16, period_ticks: u16) -> u16 {
-    let period = period_ticks.max(1) as u32;
-    let tick = tick as u32 % period;
-    let half_period = period / 2;
-    let triangle = if tick < half_period {
-        tick * LED_COMPARE_SCALE / half_period.max(1)
+fn pulse_compare(phase: u32) -> u16 {
+    let ramp = phase >> 16;
+    let triangle = if ramp < 32_768 {
+        ramp * 2
     } else {
-        (period - tick) * LED_COMPARE_SCALE / (period - half_period).max(1)
+        (65_535 - ramp) * 2
     };
-    let cubic = u64::from(triangle) * u64::from(triangle) * u64::from(triangle);
-    (cubic / u64::from(LED_COMPARE_SCALE * LED_COMPARE_SCALE)) as u16
+    let squared = triangle * triangle / LED_COMPARE_SCALE;
+    (squared * triangle / LED_COMPARE_SCALE) as u16
 }
 
 fn scale_color(channel: u8, intensity: u16) -> u16 {
@@ -369,10 +364,10 @@ mod tests {
 
     #[test]
     fn pulse_compare_matches_cubic_triangle_shape() {
-        assert_eq!(pulse_compare(0, 10_000), 0);
-        assert_eq!(pulse_compare(2_500, 10_000), 8191);
-        assert_eq!(pulse_compare(5_000, 10_000), 65_535);
-        assert_eq!(pulse_compare(7_500, 10_000), 8191);
+        assert_eq!(pulse_compare(0), 0);
+        assert_eq!(pulse_compare(0x4000_0000), 8192);
+        assert_eq!(pulse_compare(0x8000_0000), 65_532);
+        assert_eq!(pulse_compare(0xC000_0000), 8190);
     }
 
     #[test]
