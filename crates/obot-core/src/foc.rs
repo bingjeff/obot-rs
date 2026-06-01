@@ -404,6 +404,16 @@ impl FocController {
 }
 
 #[inline(always)]
+pub fn dq_currents_from_sincos(currents: PhaseCurrents, sin_t: f32, cos_t: f32) -> DqCurrents {
+    let (i_d, i_q) = dq_currents(currents, sin_t, cos_t);
+    DqCurrents {
+        i_d,
+        i_q,
+        i_0: currents.phase_a + currents.phase_b + currents.phase_c,
+    }
+}
+
+#[inline(always)]
 fn dq_currents(currents: PhaseCurrents, sin_t: f32, cos_t: f32) -> (f32, f32) {
     let i_alpha = TWO_THIRDS * currents.phase_a
         + NEG_ONE_THIRD * currents.phase_b
@@ -519,6 +529,20 @@ mod tests {
         assert_close(status.measured.i_d, 1.0);
         assert_close(status.measured.i_q, 0.0);
         assert_close(status.measured.i_0, 0.0);
+    }
+
+    #[test]
+    fn public_dq_current_helper_matches_foc_status_measurement() {
+        let currents = PhaseCurrents {
+            phase_a: 1.0,
+            phase_b: -0.5,
+            phase_c: -0.5,
+        };
+        let measured = dq_currents_from_sincos(currents, 0.0, 1.0);
+
+        assert_close(measured.i_d, 1.0);
+        assert_close(measured.i_q, 0.0);
+        assert_close(measured.i_0, 0.0);
     }
 
     #[test]

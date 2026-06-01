@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 use obot_core::{
     benchmark::BenchmarkReport,
     current::PhaseCurrents,
+    foc::{DqCurrents, DqVoltages},
     hall::HallMotionEstimate,
     output::OutputSafetyStatus,
     power::{BusVoltageCalibration, OutputGate},
@@ -156,6 +157,11 @@ static BUS_VOLTAGE_RAW: AtomicU32 = AtomicU32::new(0);
 static PHASE_CURRENT_A_MILLIAMPS: AtomicI32 = AtomicI32::new(0);
 static PHASE_CURRENT_B_MILLIAMPS: AtomicI32 = AtomicI32::new(0);
 static PHASE_CURRENT_C_MILLIAMPS: AtomicI32 = AtomicI32::new(0);
+static FOC_CURRENT_D_MILLIAMPS: AtomicI32 = AtomicI32::new(0);
+static FOC_CURRENT_Q_MILLIAMPS: AtomicI32 = AtomicI32::new(0);
+static FOC_CURRENT_0_MILLIAMPS: AtomicI32 = AtomicI32::new(0);
+static FOC_VOLTAGE_D_MILLIVOLTS: AtomicI32 = AtomicI32::new(0);
+static FOC_VOLTAGE_Q_MILLIVOLTS: AtomicI32 = AtomicI32::new(0);
 static MOTOR_POSITION_RAW: AtomicI32 = AtomicI32::new(0);
 static MOTOR_POSITION_MILLIRAD: AtomicI32 = AtomicI32::new(0);
 static MOTOR_VELOCITY_MILLIRAD_S: AtomicI32 = AtomicI32::new(0);
@@ -297,6 +303,14 @@ pub fn publish_phase_currents(currents: PhaseCurrents) {
     PHASE_CURRENT_A_MILLIAMPS.store((currents.phase_a * 1_000.0) as i32, Ordering::Relaxed);
     PHASE_CURRENT_B_MILLIAMPS.store((currents.phase_b * 1_000.0) as i32, Ordering::Relaxed);
     PHASE_CURRENT_C_MILLIAMPS.store((currents.phase_c * 1_000.0) as i32, Ordering::Relaxed);
+}
+
+pub fn publish_foc_diagnostics(currents: DqCurrents, voltages: DqVoltages) {
+    FOC_CURRENT_D_MILLIAMPS.store((currents.i_d * 1_000.0) as i32, Ordering::Relaxed);
+    FOC_CURRENT_Q_MILLIAMPS.store((currents.i_q * 1_000.0) as i32, Ordering::Relaxed);
+    FOC_CURRENT_0_MILLIAMPS.store((currents.i_0 * 1_000.0) as i32, Ordering::Relaxed);
+    FOC_VOLTAGE_D_MILLIVOLTS.store((voltages.v_d * 1_000.0) as i32, Ordering::Relaxed);
+    FOC_VOLTAGE_Q_MILLIVOLTS.store((voltages.v_q * 1_000.0) as i32, Ordering::Relaxed);
 }
 
 pub fn publish_hall_feedback(feedback: HallMotionEstimate) {
@@ -559,6 +573,11 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "ia",
     "ib",
     "ic",
+    "id",
+    "iq",
+    "i0",
+    "vd",
+    "vq",
     "motor_position_raw",
     "motor_position_rad",
     "motor_velocity_rad_s",
@@ -660,6 +679,11 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
         b"ia" => write_fixed3_milli_i32(PHASE_CURRENT_A_MILLIAMPS.load(Ordering::Relaxed), output),
         b"ib" => write_fixed3_milli_i32(PHASE_CURRENT_B_MILLIAMPS.load(Ordering::Relaxed), output),
         b"ic" => write_fixed3_milli_i32(PHASE_CURRENT_C_MILLIAMPS.load(Ordering::Relaxed), output),
+        b"id" => write_fixed3_milli_i32(FOC_CURRENT_D_MILLIAMPS.load(Ordering::Relaxed), output),
+        b"iq" => write_fixed3_milli_i32(FOC_CURRENT_Q_MILLIAMPS.load(Ordering::Relaxed), output),
+        b"i0" => write_fixed3_milli_i32(FOC_CURRENT_0_MILLIAMPS.load(Ordering::Relaxed), output),
+        b"vd" => write_fixed3_milli_i32(FOC_VOLTAGE_D_MILLIVOLTS.load(Ordering::Relaxed), output),
+        b"vq" => write_fixed3_milli_i32(FOC_VOLTAGE_Q_MILLIVOLTS.load(Ordering::Relaxed), output),
         b"motor_position_raw" => {
             write_i32_decimal(MOTOR_POSITION_RAW.load(Ordering::Relaxed), output)
         }
@@ -1249,6 +1273,27 @@ mod tests {
         assert_eq!(&output[..len], b"-0.456");
         let len = format_text_api_response(b"ic", &mut output).unwrap();
         assert_eq!(&output[..len], b"0.000");
+        publish_foc_diagnostics(
+            DqCurrents {
+                i_d: 0.125,
+                i_q: -2.5,
+                i_0: 0.777,
+            },
+            DqVoltages {
+                v_d: -1.25,
+                v_q: 3.5,
+            },
+        );
+        let len = format_text_api_response(b"id", &mut output).unwrap();
+        assert_eq!(&output[..len], b"0.125");
+        let len = format_text_api_response(b"iq", &mut output).unwrap();
+        assert_eq!(&output[..len], b"-2.500");
+        let len = format_text_api_response(b"i0", &mut output).unwrap();
+        assert_eq!(&output[..len], b"0.777");
+        let len = format_text_api_response(b"vd", &mut output).unwrap();
+        assert_eq!(&output[..len], b"-1.250");
+        let len = format_text_api_response(b"vq", &mut output).unwrap();
+        assert_eq!(&output[..len], b"3.500");
         let len = format_text_api_response(b"driver_configured", &mut output).unwrap();
         assert_eq!(&output[..len], b"false");
         let len = format_text_api_response(b"verify_error_mask", &mut output).unwrap();
