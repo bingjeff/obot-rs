@@ -893,6 +893,7 @@ struct DriverCheckUsbOptions {
     poll_interval_ms: u32,
     reset_settle_ms: u32,
     expectation: DriverCheckExpectation,
+    clear_safety_faults_after_report: bool,
     leave_driver_enabled: bool,
 }
 
@@ -1519,6 +1520,7 @@ impl DriverCheckUsbOptions {
             poll_interval_ms: DEFAULT_USB_DRIVER_CHECK_POLL_MS,
             reset_settle_ms: DEFAULT_USB_DRIVER_CHECK_RESET_MS,
             expectation: DriverCheckExpectation::None,
+            clear_safety_faults_after_report: false,
             leave_driver_enabled: false,
         };
 
@@ -1901,6 +1903,13 @@ fn powered_ready_proof_usb(options: &PoweredReadyProofUsbOptions) -> Result<Stri
         }
     }
 
+    let clear_status = clear_powered_ready_stale_faults_usb(options)?;
+    append_proof_section(
+        &mut output,
+        "clear_stale_faults",
+        &format_status_csv(DEFAULT_NAME, clear_status),
+    );
+
     let driver_result = check_driver_usb(&powered_ready_driver_options(options))?;
     append_proof_section(
         &mut output,
@@ -1921,6 +1930,30 @@ fn powered_ready_proof_passed(result: UsbDriverCheckResult) -> bool {
         && result.post_disable.command_version == result.post_disable.consumed_version
 }
 
+fn clear_powered_ready_stale_faults_usb(
+    options: &PoweredReadyProofUsbOptions,
+) -> Result<StatusPacket, String> {
+    let command = RealtimeUsbOptions {
+        device_path: options.device_path.clone(),
+        sequence: options.sequence.wrapping_sub(1),
+        mode: ControlMode::ClearFaults,
+        torque_nm: 0.0,
+        velocity_rad_s: 0.0,
+        position_rad: 0.0,
+        timeout_ms: options.timeout_ms,
+    };
+    let packet = CommandPacket {
+        sequence: command.sequence,
+        command: MotorCommand {
+            mode: ControlMode::ClearFaults,
+            ..MotorCommand::default()
+        },
+    };
+    let status = transact_realtime_usb(&command, packet)?;
+    thread::sleep(Duration::from_millis(options.reset_settle_ms as u64));
+    Ok(status)
+}
+
 fn powered_ready_driver_options(options: &PoweredReadyProofUsbOptions) -> DriverCheckUsbOptions {
     DriverCheckUsbOptions {
         command: DriverCommandUsbOptions {
@@ -1933,6 +1966,7 @@ fn powered_ready_driver_options(options: &PoweredReadyProofUsbOptions) -> Driver
         poll_interval_ms: options.poll_interval_ms,
         reset_settle_ms: options.reset_settle_ms,
         expectation: DriverCheckExpectation::PoweredReady,
+        clear_safety_faults_after_report: true,
         leave_driver_enabled: false,
     }
 }
@@ -1949,6 +1983,7 @@ fn accepted_proof_driver_options(options: &AcceptedProofUsbOptions) -> DriverChe
         poll_interval_ms: options.driver_poll_interval_ms,
         reset_settle_ms: options.reset_settle_ms,
         expectation: DriverCheckExpectation::UnpoweredFailClosed,
+        clear_safety_faults_after_report: false,
         leave_driver_enabled: false,
     }
 }
@@ -2374,8 +2409,15 @@ fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckRes
     let immediate_status = transact_driver_command_usb(&options.command, packet)?;
     thread::sleep(Duration::from_millis(options.reset_settle_ms as u64));
     let device_path = options.command.resolved_device_path()?;
-    let fields = poll_usb_driver_check_fields(&device_path, options)?;
+    let mut fields = poll_usb_driver_check_fields(&device_path, options)?;
     let report_observed = usb_driver_report_observed(fields);
+    let safety_clear_sent = options.clear_safety_faults_after_report
+        && options.command.command == DriverCommand::ConfigureEnable
+        && report_observed;
+    if safety_clear_sent {
+        clear_driver_safety_faults_usb(options, options.command.sequence.wrapping_add(1))?;
+        fields = poll_usb_driver_check_fields(&device_path, options)?;
+    }
     let check_passed = driver_check_expectation_passed(
         options.expectation,
         immediate_status,
@@ -2387,7 +2429,9 @@ fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckRes
         && !options.leave_driver_enabled
     {
         let mut disable = options.command.clone();
-        disable.sequence = disable.sequence.wrapping_add(1);
+        disable.sequence = disable
+            .sequence
+            .wrapping_add(if safety_clear_sent { 2 } else { 1 });
         disable.command = DriverCommand::Disable;
         let disable_packet = DriverCommandPacket {
             sequence: disable.sequence,
@@ -2409,6 +2453,31 @@ fn check_driver_usb(options: &DriverCheckUsbOptions) -> Result<UsbDriverCheckRes
         expectation: options.expectation,
         check_passed,
     })
+}
+
+fn clear_driver_safety_faults_usb(
+    options: &DriverCheckUsbOptions,
+    sequence: u8,
+) -> Result<StatusPacket, String> {
+    let command = RealtimeUsbOptions {
+        device_path: options.command.device_path.clone(),
+        sequence,
+        mode: ControlMode::ClearFaults,
+        torque_nm: 0.0,
+        velocity_rad_s: 0.0,
+        position_rad: 0.0,
+        timeout_ms: options.command.timeout_ms,
+    };
+    let packet = CommandPacket {
+        sequence: command.sequence,
+        command: MotorCommand {
+            mode: ControlMode::ClearFaults,
+            ..MotorCommand::default()
+        },
+    };
+    let status = transact_realtime_usb(&command, packet)?;
+    thread::sleep(Duration::from_millis(options.reset_settle_ms as u64));
+    Ok(status)
 }
 
 fn poll_usb_driver_check_fields(
@@ -4333,7 +4402,7 @@ mod tests {
         assert!(output.starts_with("name, benchmark_sequence, status_sequence"));
         assert!(output.contains("combined_mean_load_percent"));
         assert!(output.contains(", combined_max_remaining_cycles,"));
-        assert!(output.contains("rust, 9, 3, 4, 5, 6, 710, 3416, 20.78, 2706, 6445, 17045, 37.81, 10600, 9995, 58.79, 7005, 708.965, 3555.49, 7100.315, 41.77, 9899.685, torque_limit, false, true, true, true, false, true, true, 1963, 8.000, true, false, 0x0012, 0x0040, 0xAABBCCDD, 0x11223344, 1.25, 0, -0.5\n"));
+        assert!(output.contains("rust, 9, 3, 4, 5, 6, 710, 3416, 20.78, 2706, 6445, 17045, 37.81, 10600, 9995, 58.79, 7005, 708.965, 3555.49, 7100.315, 41.77, 9899.685, torque_limit, false, true, true, true, false, true, true, 595, 8.002, true, false, 0x0012, 0x0040, 0xAABBCCDD, 0x11223344, 1.25, 0, -0.5\n"));
     }
 
     #[test]
