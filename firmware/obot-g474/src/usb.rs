@@ -3,6 +3,7 @@ use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 
 use obot_core::{
     benchmark::BenchmarkReport,
+    current::PhaseCurrents,
     hall::HallMotionEstimate,
     output::OutputSafetyStatus,
     power::{BusVoltageCalibration, OutputGate},
@@ -152,6 +153,9 @@ static BENCH_T_EXEC_MAINLOOP: AtomicU32 = AtomicU32::new(0);
 static BENCH_T_PERIOD_MAINLOOP: AtomicU32 = AtomicU32::new(0);
 static OUTPUT_SAFETY_FLAGS: AtomicU32 = AtomicU32::new(0);
 static BUS_VOLTAGE_RAW: AtomicU32 = AtomicU32::new(0);
+static PHASE_CURRENT_A_MILLIAMPS: AtomicI32 = AtomicI32::new(0);
+static PHASE_CURRENT_B_MILLIAMPS: AtomicI32 = AtomicI32::new(0);
+static PHASE_CURRENT_C_MILLIAMPS: AtomicI32 = AtomicI32::new(0);
 static MOTOR_POSITION_RAW: AtomicI32 = AtomicI32::new(0);
 static MOTOR_POSITION_MILLIRAD: AtomicI32 = AtomicI32::new(0);
 static MOTOR_VELOCITY_MILLIRAD_S: AtomicI32 = AtomicI32::new(0);
@@ -287,6 +291,12 @@ pub fn publish_output_safety_status(status: OutputSafetyStatus) {
 
 pub fn publish_bus_voltage_raw(raw: u16) {
     BUS_VOLTAGE_RAW.store(raw as u32, Ordering::Relaxed);
+}
+
+pub fn publish_phase_currents(currents: PhaseCurrents) {
+    PHASE_CURRENT_A_MILLIAMPS.store((currents.phase_a * 1_000.0) as i32, Ordering::Relaxed);
+    PHASE_CURRENT_B_MILLIAMPS.store((currents.phase_b * 1_000.0) as i32, Ordering::Relaxed);
+    PHASE_CURRENT_C_MILLIAMPS.store((currents.phase_c * 1_000.0) as i32, Ordering::Relaxed);
 }
 
 pub fn publish_hall_feedback(feedback: HallMotionEstimate) {
@@ -544,6 +554,9 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "bus_voltage_raw",
     "bus_voltage_volts",
     "bus_allows_output",
+    "ia",
+    "ib",
+    "ic",
     "motor_position_raw",
     "motor_position_rad",
     "motor_velocity_rad_s",
@@ -640,6 +653,9 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
                 .allows_output_raw(BUS_VOLTAGE_RAW.load(Ordering::Relaxed) as u16),
             output,
         ),
+        b"ia" => write_fixed3_milli_i32(PHASE_CURRENT_A_MILLIAMPS.load(Ordering::Relaxed), output),
+        b"ib" => write_fixed3_milli_i32(PHASE_CURRENT_B_MILLIAMPS.load(Ordering::Relaxed), output),
+        b"ic" => write_fixed3_milli_i32(PHASE_CURRENT_C_MILLIAMPS.load(Ordering::Relaxed), output),
         b"motor_position_raw" => {
             write_i32_decimal(MOTOR_POSITION_RAW.load(Ordering::Relaxed), output)
         }
@@ -1214,6 +1230,17 @@ mod tests {
         assert_eq!(&output[..len], b"true");
         let len = format_text_api_response(b"bus_voltage_raw", &mut output).unwrap();
         assert_eq!(&output[..len], b"1963");
+        publish_phase_currents(PhaseCurrents {
+            phase_a: 1.234,
+            phase_b: -0.4567,
+            phase_c: 0.0,
+        });
+        let len = format_text_api_response(b"ia", &mut output).unwrap();
+        assert_eq!(&output[..len], b"1.234");
+        let len = format_text_api_response(b"ib", &mut output).unwrap();
+        assert_eq!(&output[..len], b"-0.456");
+        let len = format_text_api_response(b"ic", &mut output).unwrap();
+        assert_eq!(&output[..len], b"0.000");
         let len = format_text_api_response(b"driver_configured", &mut output).unwrap();
         assert_eq!(&output[..len], b"false");
         let len = format_text_api_response(b"verify_error_mask", &mut output).unwrap();

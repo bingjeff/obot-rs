@@ -27,7 +27,7 @@ use obot_core::{
 };
 #[cfg(target_os = "none")]
 use obot_core::{
-    current::CurrentCalibration,
+    current::{CurrentCalibration, PhaseCurrents},
     foc::{FocDesired, MotorHallFocController},
     hall::{HallElectricalAngle, HallMotionEstimate, HallMotionEstimator},
     host::{HostCommandWatchdog, HostCommandWatchdogStatus},
@@ -198,6 +198,8 @@ fn firmware_main() -> ! {
                 }
                 let controller_state = controller_storage_mut().state();
                 let hall_count = fast_loop_hall_count();
+                let phase_currents = fast_loop_phase_currents();
+                obot_g474::usb::publish_phase_currents(phase_currents);
                 let hall_feedback = hall_motion.update(obot_core::hall::HallSample {
                     count: hall_count,
                     hall_count: 0,
@@ -247,6 +249,7 @@ fn firmware_main() -> ! {
                     last_driver_report,
                     output_safety_status,
                     bus_voltage_raw,
+                    phase_currents,
                     hall_feedback,
                     bridge_output_status,
                     bridge_prearm_blockers,
@@ -359,6 +362,7 @@ struct FastLoopContext {
     foc: MotorHallFocController,
     foc_desired: FocDesired,
     output_allowed: bool,
+    latest_currents: PhaseCurrents,
 }
 
 #[cfg(target_os = "none")]
@@ -382,6 +386,7 @@ impl FastLoopContext {
             foc,
             foc_desired,
             output_allowed,
+            latest_currents: PhaseCurrents::default(),
         }
     }
 
@@ -391,6 +396,7 @@ impl FastLoopContext {
         self.hall_count = hall_sample.count;
         let hall_sincos = HallElectricalAngle::motor_hall_sincos_hall_count(hall_sample.hall_count);
         let currents = CurrentCalibration::motor_hall_convert(self.current_adc.read_samples());
+        self.latest_currents = currents;
         let voltage_command = self.foc.step_voltage_command_with_sincos(
             self.foc_desired,
             currents,
@@ -488,6 +494,15 @@ fn fast_loop_hall_count() -> i32 {
 }
 
 #[cfg(target_os = "none")]
+fn fast_loop_phase_currents() -> PhaseCurrents {
+    interrupt_free(|| {
+        fast_loop_context_mut()
+            .map(|context| context.latest_currents)
+            .unwrap_or_default()
+    })
+}
+
+#[cfg(target_os = "none")]
 fn fast_loop_bridge_output_status() -> BridgeOutputStatus {
     interrupt_free(|| {
         fast_loop_context_mut()
@@ -573,6 +588,7 @@ fn service_text_api_debug(
     driver_report: Drv8323sConfigReport,
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
+    phase_currents: PhaseCurrents,
     hall_feedback: HallMotionEstimate,
     bridge_output_status: BridgeOutputStatus,
     bridge_prearm_blockers: u32,
@@ -592,6 +608,7 @@ fn service_text_api_debug(
                 driver_report,
                 output_safety_status,
                 bus_voltage_raw,
+                phase_currents,
                 hall_feedback,
                 bridge_output_status,
                 bridge_prearm_blockers,
@@ -676,6 +693,9 @@ const TEXT_API_NAMES: &[&str] = &[
     "bus_voltage_raw",
     "bus_voltage_volts",
     "bus_allows_output",
+    "ia",
+    "ib",
+    "ic",
     "bridge_output_disable_status",
     "bridge_outputs_disabled",
     "bridge_outputs_enabled",
@@ -701,6 +721,7 @@ fn dispatch_firmware_text_api<'out>(
     driver_report: Drv8323sConfigReport,
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
+    phase_currents: PhaseCurrents,
     hall_feedback: HallMotionEstimate,
     bridge_output_status: BridgeOutputStatus,
     bridge_prearm_blockers: u32,
@@ -714,6 +735,7 @@ fn dispatch_firmware_text_api<'out>(
             driver_report,
             output_safety_status,
             bus_voltage_raw,
+            phase_currents,
             hall_feedback,
             bridge_output_status,
             bridge_prearm_blockers,
@@ -750,6 +772,7 @@ fn format_firmware_text_api_value<'out>(
     driver_report: Drv8323sConfigReport,
     output_safety_status: OutputSafetyStatus,
     bus_voltage_raw: u16,
+    phase_currents: PhaseCurrents,
     hall_feedback: HallMotionEstimate,
     bridge_output_status: BridgeOutputStatus,
     bridge_prearm_blockers: u32,
@@ -832,6 +855,9 @@ fn format_firmware_text_api_value<'out>(
         "bus_allows_output" => {
             ApiValue::Bool(OutputGate::MOTOR_HALL.allows_output_raw(bus_voltage_raw))
         }
+        "ia" => ApiValue::Fixed3((phase_currents.phase_a * 1_000.0) as i64),
+        "ib" => ApiValue::Fixed3((phase_currents.phase_b * 1_000.0) as i64),
+        "ic" => ApiValue::Fixed3((phase_currents.phase_c * 1_000.0) as i64),
         "bridge_output_disable_status" => ApiValue::U32(bridge_output_status.disable_status),
         "bridge_outputs_disabled" => ApiValue::Bool(bridge_output_status.all_disabled),
         "bridge_outputs_enabled" => ApiValue::Bool(bridge_output_status.all_enabled),
