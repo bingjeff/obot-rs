@@ -551,6 +551,8 @@ const USB_TEXT_API_NAMES: &[&str] = &[
     "driver_fault_latched",
     "controller_faulted",
     "host_timed_out",
+    "vbus",
+    "phase_mode",
     "bus_voltage_raw",
     "bus_voltage_volts",
     "bus_allows_output",
@@ -646,6 +648,8 @@ fn format_text_api_response(request: &[u8], output: &mut [u8]) -> Option<usize> 
             write_bool(load_output_safety_flag(CONTROLLER_FAULTED_BIT), output)
         }
         b"host_timed_out" => write_bool(load_output_safety_flag(HOST_TIMED_OUT_BIT), output),
+        b"vbus" => write_fixed3_milli_i32(bus_voltage_millivolts(), output),
+        b"phase_mode" => write_u32_decimal(1, output),
         b"bus_voltage_raw" => write_u32_decimal(BUS_VOLTAGE_RAW.load(Ordering::Relaxed), output),
         b"bus_voltage_volts" => write_fixed3_milli_i32(bus_voltage_millivolts(), output),
         b"bus_allows_output" => write_bool(
@@ -1228,6 +1232,10 @@ mod tests {
         assert_eq!(&output[..len], b"false");
         let len = format_text_api_response(b"host_timed_out", &mut output).unwrap();
         assert_eq!(&output[..len], b"true");
+        let len = format_text_api_response(b"vbus", &mut output).unwrap();
+        assert_eq!(&output[..len], b"26.406");
+        let len = format_text_api_response(b"phase_mode", &mut output).unwrap();
+        assert_eq!(&output[..len], b"1");
         let len = format_text_api_response(b"bus_voltage_raw", &mut output).unwrap();
         assert_eq!(&output[..len], b"1963");
         publish_phase_currents(PhaseCurrents {

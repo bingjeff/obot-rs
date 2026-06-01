@@ -690,6 +690,8 @@ const TEXT_API_NAMES: &[&str] = &[
     "driver_fault_latched",
     "controller_faulted",
     "host_timed_out",
+    "vbus",
+    "phase_mode",
     "bus_voltage_raw",
     "bus_voltage_volts",
     "bus_allows_output",
@@ -850,6 +852,8 @@ fn format_firmware_text_api_value<'out>(
         "driver_fault_latched" => ApiValue::Bool(output_safety_status.driver_fault_latched),
         "controller_faulted" => ApiValue::Bool(output_safety_status.controller_faulted),
         "host_timed_out" => ApiValue::Bool(output_safety_status.host_timed_out),
+        "vbus" => ApiValue::Fixed3(bus_voltage_millivolts(bus_voltage_raw)),
+        "phase_mode" => ApiValue::U8(1),
         "bus_voltage_raw" => ApiValue::U16(bus_voltage_raw),
         "bus_voltage_volts" => ApiValue::Fixed3(bus_voltage_millivolts(bus_voltage_raw)),
         "bus_allows_output" => {
