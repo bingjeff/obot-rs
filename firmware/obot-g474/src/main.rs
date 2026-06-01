@@ -403,8 +403,7 @@ impl FastLoopContext {
             hall_sincos.sin,
             hall_sincos.cos,
         );
-        core::hint::black_box(voltage_command.v_d);
-        core::hint::black_box(voltage_command.v_q);
+        core::hint::black_box(voltage_command);
         self.pwm.write_zero_voltage();
         self.benchmark.finish(sample, self.cycle_counter.now());
     }
